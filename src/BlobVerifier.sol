@@ -71,6 +71,29 @@ library BlobVerifier {
         bytes calldata commitment,
         bytes calldata proof
     ) internal view {
+        // Retrieve the versioned hash via BLOBHASH opcode
+        bytes32 versionedHash = getBlobHash(blobIndex);
+        _verifySinglePoint(versionedHash, z, y, commitment, proof);
+    }
+
+    function verifySinglePoint(
+        bytes32 versionedHash,
+        bytes32 z,
+        bytes32 y,
+        bytes calldata commitment,
+        bytes calldata proof
+    ) internal view {
+        // Retrieve the versioned hash via BLOBHASH opcode
+        _verifySinglePoint(versionedHash, z, y, commitment, proof);
+    }
+
+    function _verifySinglePoint(
+        bytes32 versionedHash,
+        bytes32 z,
+        bytes32 y,
+        bytes calldata commitment,
+        bytes calldata proof
+    ) internal view {
         // Validate input lengths
         if (commitment.length != COMMITMENT_LENGTH) {
             revert InvalidCommitmentLength(commitment.length);
@@ -78,9 +101,6 @@ library BlobVerifier {
         if (proof.length != PROOF_LENGTH) {
             revert InvalidProofLength(proof.length);
         }
-
-        // Retrieve the versioned hash via BLOBHASH opcode
-        bytes32 versionedHash = getBlobHash(blobIndex);
 
         (bool ok, bytes memory output) = POINT_EVALUATION_PRECOMPILE
             .staticcall(abi.encodePacked(versionedHash, z, y, commitment, proof));
