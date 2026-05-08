@@ -60,6 +60,8 @@ library BlobVerifier {
     /// @param length The actual length provided.
     error InvalidProofLength(uint256 length);
 
+    error InvalidPointEvaluationPrecompileOutput();
+
     // ──────────────────────────────────────────────────────────────────────
     //  Core functions
     // ──────────────────────────────────────────────────────────────────────
@@ -83,6 +85,8 @@ library BlobVerifier {
         bytes calldata commitment,
         bytes calldata proof
     ) internal view {
+        // Check provided hash prefix
+        _checkHashPrefix(versionedHash);
         // Retrieve the versioned hash via BLOBHASH opcode
         _verifySinglePoint(versionedHash, z, y, commitment, proof);
     }
@@ -93,7 +97,7 @@ library BlobVerifier {
         bytes32 y,
         bytes calldata commitment,
         bytes calldata proof
-    ) internal view {
+    ) private view {
         // Validate input lengths
         if (commitment.length != COMMITMENT_LENGTH) {
             revert InvalidCommitmentLength(commitment.length);
@@ -107,7 +111,7 @@ library BlobVerifier {
 
         if (!ok) revert PointEvaluationPrecompileCallFailed();
         // Checks for both blob number of fields and the bls modulus
-        if (keccak256(output) != POINT_EVALUATION_PRECOMPILE_OUTPUT) revert ();
+        if (keccak256(output) != POINT_EVALUATION_PRECOMPILE_OUTPUT) revert InvalidPointEvaluationPrecompileOutput();
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -122,9 +126,7 @@ library BlobVerifier {
             revert BlobNotFoundAtIndex(blobIndex);
         }
 
-        if (versionedHash[0] != VERSIONED_HASH_VERSION_KZG) {
-            revert InvalidVersionedHashVersion(versionedHash[0]);
-        }
+        _checkHashPrefix(versionedHash);
     }
 
     /// @notice Compute the versioned hash from a KZG commitment.
@@ -153,9 +155,10 @@ library BlobVerifier {
     /// @return blobIndex if `blobHash` is present among transaction blobs.
     function getBlobIndex(bytes32 blobHash) internal view returns (uint256 blobIndex) {
         while (true) {
-            bytes32 blobHashAtIndex = blobhash(blobIndex++);
+            bytes32 blobHashAtIndex = blobhash(blobIndex);
             if (blobHashAtIndex == bytes32(0)) revert BlobHashNotFound(blobHash);
             if (blobHashAtIndex == blobHash) return blobIndex;
+            blobIndex++;
         }
     }
 
@@ -171,7 +174,14 @@ library BlobVerifier {
     /// @return count Number of blobs found.
     function blobCount() internal view returns (uint256 count) {
         while (true) {
-            if (blobhash(count++) == bytes32(0)) break;
+            if (blobhash(count) == bytes32(0)) break;
+            count++;
+        }
+    }
+
+    function _checkHashPrefix(bytes32 blobHash) private view {
+        if (versionedHash[0] != VERSIONED_HASH_VERSION_KZG) {
+            revert InvalidVersionedHashVersion(versionedHash[0]);
         }
     }
 }
