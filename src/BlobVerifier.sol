@@ -7,12 +7,30 @@ library BlobVerifier {
     //  Constants
     // ──────────────────────────────────────────────────────────────────────
 
+    /// @dev Address of the EIP-4844 point evaluation precompile.
+    address internal constant POINT_EVALUATION_PRECOMPILE = address(0x0A);
+
     /// @dev Version byte prepended to KZG commitment hashes (EIP-4844 §Helpers).
     bytes1 internal constant VERSIONED_HASH_VERSION_KZG = 0x01;
 
     /// @dev Byte lengths for KZG G1 points (compressed).
     uint256 internal constant COMMITMENT_LENGTH = 48;
     uint256 internal constant PROOF_LENGTH = 48;
+
+    /// @dev Number of field elements in a blob polynomial (4096).
+    ///      First 32 bytes of the expected precompile output.
+    bytes32 internal constant FIELD_ELEMENTS_PER_BLOB =
+        bytes32(uint256(4096));
+
+    /// @dev BLS12-381 scalar field modulus.
+    ///      Second 32 bytes of the expected precompile output.
+    bytes32 internal constant BLS_MODULUS =
+        bytes32(uint256(52435875175126190479447740508185965837690552500527637822603658699938581184513));
+
+    // @dev The precompile expected output on success:
+    // keccak(FIELD_ELEMENTS_PER_BLOB + BLS_MODULUS)
+    bytes32 internal constant POINT_EVALUATION_PRECOMPILE_OUTPUT =
+        0xb2157d3a40131b14c4c675335465dffde802f0ce5218ad012284d7f275d1b37c;
 
     // ──────────────────────────────────────────────────────────────────────
     //  Errors
@@ -32,6 +50,45 @@ library BlobVerifier {
     /// @notice The KZG commitment is not exactly 48 bytes.
     /// @param length The actual length provided.
     error InvalidCommitmentLength(uint256 length);
+
+    /// @notice The point evaluation precompile returned failure.
+    ///         This means the proof is invalid: the blob does NOT evaluate
+    ///         to the claimed value at the given point.
+    error PointEvaluationPrecompileCallFailed();
+
+    /// @notice The KZG proof is not exactly 48 bytes.
+    /// @param length The actual length provided.
+    error InvalidProofLength(uint256 length);
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  Core functions
+    // ──────────────────────────────────────────────────────────────────────
+
+    function verifySinglePoint(
+        uint256 blobIndex,
+        bytes32 z,
+        bytes32 y,
+        bytes calldata commitment,
+        bytes calldata proof
+    ) internal view {
+        // Validate input lengths
+        if (commitment.length != COMMITMENT_LENGTH) {
+            revert InvalidCommitmentLength(commitment.length);
+        }
+        if (proof.length != PROOF_LENGTH) {
+            revert InvalidProofLength(proof.length);
+        }
+
+        // Retrieve the versioned hash via BLOBHASH opcode
+        bytes32 versionedHash = getBlobHash(blobIndex);
+
+        (bool ok, bytes memory output) = POINT_EVALUATION_PRECOMPILE
+            .staticcall(abi.encodePacked(versionedHash, z, y, commitment, proof));
+
+        if (!ok) revert PointEvaluationPrecompileCallFailed();
+        // Checks for both blob number of fields and the bls modulus
+        if (keccak256(output) != POINT_EVALUATION_PRECOMPILE_OUTPUT) revert ();
+    }
 
     // ──────────────────────────────────────────────────────────────────────
     //  Utility functions
