@@ -179,7 +179,7 @@ library BlobVerifier {
         }
     }
 
-    function _checkHashPrefix(bytes32 blobHash) private view {
+    function _checkHashPrefix(bytes32 versionedHash) private pure {
         if (versionedHash[0] != VERSIONED_HASH_VERSION_KZG) {
             revert InvalidVersionedHashVersion(versionedHash[0]);
         }
