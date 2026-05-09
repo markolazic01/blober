@@ -422,14 +422,12 @@ library BlobVerifier {
         if (commitment.length != COMMITMENT_LENGTH) {
             revert InvalidCommitmentLength(commitment.length);
         }
-        versionedHash = sha256(commitment);
-
-        assembly {
-            versionedHash := or(
-                and(versionedHash, 0x00ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff),
-                0x0100000000000000000000000000000000000000000000000000000000000000
-            )
-        }
+        // EIP-4844: replace the top byte of sha256(commitment) with the KZG version byte (0x01).
+        bytes32 digest = sha256(commitment);
+        versionedHash = bytes32(
+            (uint256(digest) & 0x00ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)
+            | (uint256(uint8(VERSIONED_HASH_VERSION_KZG)) << 248)
+        );
     }
 
     /// @notice Find an index of a given blob hash.

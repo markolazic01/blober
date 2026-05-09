@@ -27,13 +27,31 @@ contract BlobVerifierHarness {
         BlobVerifier.verifySinglePoint(versionedHash, z, y, commitment, proof);
     }
 
+    function verifyMultiplePoints128(
+        bytes32 blobHash,
+        bytes32[] calldata z_coordinates,
+        bytes32[] calldata y_coordinates,
+        bytes calldata commitment,
+        bytes[] calldata proofs
+    ) external view {
+        BlobVerifier.verifyMultiplePoints128(blobHash, z_coordinates, y_coordinates, commitment, proofs);
+    }
+
+    function verifySinglePointMultipleBlobs128(
+        bytes32[] calldata blobHashes,
+        bytes32 z,
+        bytes32[] calldata y_coordinates,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) external view {
+        BlobVerifier.verifySinglePointMultipleBlobs128(blobHashes, z, y_coordinates, commitments, proofs);
+    }
+
     function getBlobHash(uint256 blobIndex) external view returns (bytes32) {
         return BlobVerifier.getBlobHash(blobIndex);
     }
 
-    function commitmentToVersionedHash(
-        bytes calldata commitment
-    ) external pure returns (bytes32) {
+    function commitmentToVersionedHash(bytes calldata commitment) external pure returns (bytes32) {
         return BlobVerifier.commitmentToVersionedHash(commitment);
     }
 

@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {BlobVerifier} from "../src/BlobVerifier.sol";
+import {Bls12381} from "../src/Bls12381.sol";
 import {BlobVerifierHarness} from "./BlobVerifierHarness.sol";
 
 contract BlobVerifierTest is Test {
@@ -18,6 +19,29 @@ contract BlobVerifierTest is Test {
     Kzg validProof; // correct_proof_1_0:    non-trivial commitment, valid opening (P(0) = 2)
     Kzg zeroProof; // correct_proof_0_0:    zero polynomial, commitment & proof at infinity
     Kzg badProof; // incorrect_proof_1_0:  same input as validProof but wrong proof (G1 generator)
+
+    /// @dev 128-byte (uncompressed) fixture for verifyMultiplePoints128.
+    ///      Many points, one blob — six openings of poly 2 (correct_proof_2_0..5).
+    struct KzgMultiPointOneBlob {
+        bytes commitment; // 128 bytes, shared
+        bytes32[] z; // 6 elements
+        bytes32[] y; // 6 elements
+        bytes[] proofs; // 6 elements, 128 bytes each
+    }
+
+    KzgMultiPointOneBlob multiPointOneBlob;
+
+    /// @dev 128-byte (uncompressed) fixture for verifySinglePointMultipleBlobs128.
+    ///      Many blobs, one point — three blobs (polys 2, 3, 4) opened at the same z.
+    struct KzgMultiBlobOnePoint {
+        bytes32 z;             // shared
+        bytes[] commitments;   // 3 elements, 128 bytes each
+        bytes32[] y;           // 3 elements
+        bytes[] proofs;        // 3 elements, 128 bytes each
+    }
+
+    KzgMultiBlobOnePoint multiBlobOnePoint;     // z = 0 (degenerate path: r_i·z = 0)
+    KzgMultiBlobOnePoint multiBlobOnePointZ1;   // z = 1 (full LHS proof slots exercised)
 
     // ── Test constants ──────────────────────────────────────────────────
 
@@ -42,6 +66,9 @@ contract BlobVerifierTest is Test {
         validProof = _load("correct_proof_1_0");
         zeroProof = _load("correct_proof_0_0");
         badProof = _load("incorrect_proof_1_0");
+        multiPointOneBlob = _loadMultiPointOneBlob("multi_point_one_blob_128");
+        multiBlobOnePoint = _loadMultiBlobOnePoint("multi_blob_one_point_128");
+        multiBlobOnePointZ1 = _loadMultiBlobOnePoint("multi_blob_one_point_z1_128");
     }
 
     function _load(string memory name) internal view returns (Kzg memory f) {
@@ -50,6 +77,22 @@ contract BlobVerifierTest is Test {
         f.z = vm.parseJsonBytes32(j, ".z");
         f.y = vm.parseJsonBytes32(j, ".y");
         f.proof = vm.parseJsonBytes(j, ".proof");
+    }
+
+    function _loadMultiPointOneBlob(string memory name) internal view returns (KzgMultiPointOneBlob memory f) {
+        string memory j = vm.readFile(string.concat("test/fixtures/", name, ".json"));
+        f.commitment = vm.parseJsonBytes(j, ".commitment");
+        f.z = vm.parseJsonBytes32Array(j, ".z");
+        f.y = vm.parseJsonBytes32Array(j, ".y");
+        f.proofs = vm.parseJsonBytesArray(j, ".proofs");
+    }
+
+    function _loadMultiBlobOnePoint(string memory name) internal view returns (KzgMultiBlobOnePoint memory f) {
+        string memory j = vm.readFile(string.concat("test/fixtures/", name, ".json"));
+        f.z = vm.parseJsonBytes32(j, ".z");
+        f.commitments = vm.parseJsonBytesArray(j, ".commitments");
+        f.y = vm.parseJsonBytes32Array(j, ".y");
+        f.proofs = vm.parseJsonBytesArray(j, ".proofs");
     }
 
     function _setSingleBlobHash(bytes32 h) internal {
@@ -300,5 +343,46 @@ contract BlobVerifierTest is Test {
 
         harness.verifySinglePointByIndex(0, validProof.z, validProof.y, validProof.commitment, validProof.proof);
         harness.verifySinglePointByIndex(1, zeroProof.z, zeroProof.y, zeroProof.commitment, zeroProof.proof);
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    //  verifyMultiplePoints128 (one blob, multiple openings, batched pairing)
+    // ════════════════════════════════════════════════════════════════════
+
+    function test_verifyMultiplePoints128_success() public view {
+        bytes32 blobHash = _blobHashFor(multiPointOneBlob.commitment);
+
+        harness.verifyMultiplePoints128(
+            blobHash, multiPointOneBlob.z, multiPointOneBlob.y, multiPointOneBlob.commitment, multiPointOneBlob.proofs
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    //  verifySinglePointMultipleBlobs128 (many blobs, one point, batched pairing)
+    // ════════════════════════════════════════════════════════════════════
+
+    function test_verifySinglePointMultipleBlobs128_z0_success() public view {
+        _runMultiBlobOnePointSuccess(multiBlobOnePoint);
+    }
+
+    function test_verifySinglePointMultipleBlobs128_z1_success() public view {
+        // z=1 — exercises the Σ(r_i·z)·π_i term in the LHS that's zeroed at z=0.
+        _runMultiBlobOnePointSuccess(multiBlobOnePointZ1);
+    }
+
+    /// @dev Shared happy-path runner: derive each blobHash from the loaded commitment, call.
+    function _runMultiBlobOnePointSuccess(KzgMultiBlobOnePoint memory f) internal view {
+        bytes32[] memory blobHashes = new bytes32[](f.commitments.length);
+        for (uint256 i; i < f.commitments.length; ++i) {
+            blobHashes[i] = _blobHashFor(f.commitments[i]);
+        }
+
+        harness.verifySinglePointMultipleBlobs128(blobHashes, f.z, f.y, f.commitments, f.proofs);
+    }
+
+    /// @dev Derive the EIP-4844 versioned hash from a 128-byte uncompressed G1 commitment.
+    ///      Used by the *128 happy-path tests to construct the blobHash the verifier expects.
+    function _blobHashFor(bytes memory uncompressed) internal pure returns (bytes32) {
+        return BlobVerifier.commitmentToVersionedHash(Bls12381.compress(uncompressed));
     }
 }
