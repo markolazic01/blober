@@ -19,3 +19,4 @@ node_modules/
 # Python venv for chart generation (benchmarks/.venv)
 .venv/
 __pycache__/
+.DS_Store
