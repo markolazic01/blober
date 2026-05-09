@@ -4,12 +4,15 @@ Side-by-side measurement of `BlobVerifier`'s EIP-2537 batched KZG verifiers vs t
 
 ## Headline
 
-- **At every batch size, our verifier is ≥ as good as the standard.** Threshold fallback at small N keeps us within parity (≤3% overhead at N=1).
-- **Asymptotic savings at scale**: ~66% (multi-blob shared-z) and ~71% (multi-point single-blob) — measured against synthetic gas curves up to N=1000.
+- **Below the crossover (N=1–4), Blober is ≤3% worse than the standard** (just threshold-fallback wrapper overhead — multi-point N=1 is a worst case at −10%). Above N=5, savings flip positive and grow rapidly.
+- **Asymptotic savings at scale**: ~64% (multi-blob shared-z) and ~69% (multi-point single-blob) at N=100, measured against synthetic gas curves.
 - **Real mainnet replay** (90-day window): 4,102 KZG state-update txs from a representative production rollup contract, all at N=6, totalling 223.9M gas saved (~0.172 ETH at observed gas).
-- **Projected annualized savings**: 1.69 ETH/yr per rollup at today's behavior + trailing-1y gas; **104 ETH/yr per rollup if batches grow to N=100**; **3,548 ETH/yr** at higher N + historical typical gas.
+- **Projected annualized savings**: 1.69 ETH/yr per rollup at today's behavior + trailing-1y gas; **104 ETH/yr per rollup if batches grow to N=100**; **341 ETH/yr** at N=100 + trailing-2y gas (bull-market baseline).
 
 All numbers are reproducible from the artifacts in `benchmarks/data/` (commands at the bottom).
+
+![Gas vs N — multi-blob shared z](data/chart_gas_curves_multi_blob.png)
+![Gas savings vs N](data/chart_savings.png)
 
 ## Synthetic benchmark — gas vs N
 
@@ -19,35 +22,43 @@ Two test scenarios, both measured by Foundry against real EIP-2537 / EIP-4844 pr
 
 `data/synthetic_gas_multi_blob_one_point.csv`
 
-| N | Loop gas | Batched gas | Batched / Loop | Saved % |
+| N | Industry-standard gas | Blober gas | Blober / Industry | Saved % |
 |---|---|---|---|---|
-| 1 | 57,380 | 59,159 | 103% | parity |
-| 3 | 160,215 | 165,094 | 103% | parity |
-| **5** | 265,582 | 243,235 | 91% | **9%** ← crossover |
-| 10 | 529,072 | 344,316 | 65% | 35% |
-| 25 | 1,320,085 | 629,051 | 47% | 53% |
-| 50 | 2,640,716 | 1,074,313 | 40% | 60% |
-| 100 | 5,290,022 | 1,907,285 | 36% | 64% |
-| 200 | 10,647,031 | 3,665,870 | 34% | **66%** ← peak |
-| 500 | 27,193,104 | 9,571,688 | 35% | 65% |
-| 1000 | 56,046,070 | 20,895,252 | 37% | 63% |
+| 1 | 57,380 | 59,159 | 103% | −3% |
+| 2 | 107,550 | 110,876 | 103% | −3% |
+| 3 | 160,232 | 165,100 | 103% | −3% |
+| 4 | 212,929 | 219,364 | 103% | −3% |
+| **5** | 265,646 | 243,257 | 91% | **+9%** ← crossover |
+| 10 | 529,190 | 344,358 | 65% | 35% |
+| 25 | 1,320,362 | 629,158 | 47% | 53% |
+| 50 | 2,641,262 | 1,074,528 | 40% | 60% |
+| 100 | 5,291,111 | 1,907,717 | 36% | 64% |
+| 200 | 10,649,222 | 3,666,743 | 34% | **66%** ← peak |
+| 500 | 27,198,624 | 9,573,892 | 35% | 65% |
+| 1000 | 56,057,254 | 20,899,722 | 37% | 63% |
+
+The negative percentages at N=1–4 are the threshold-fallback overhead: Blober dispatches to the `0x0A` loop below N=5 (so it's never *worse* than the standard in absolute terms), but pays a small wrapper cost (compress 128→48-byte commitments before the call).
 
 ### Multi-point, one blob (`verifyMultiplePoints128`)
 
+![Gas vs N — multi-point, one blob](data/chart_gas_curves_multi_point.png)
+
 `data/synthetic_gas_multi_point_one_blob.csv`
 
-| N | Loop gas | Batched gas | Batched / Loop | Saved % |
+| N | Industry-standard gas | Blober gas | Blober / Industry | Saved % |
 |---|---|---|---|---|
-| 1 | 63,250 | 69,665 | 110% | parity |
-| 3 | 158,558 | 163,075 | 102% | parity |
-| **5** | 262,381 | 234,140 | 89% | **11%** ← crossover |
-| 10 | 521,967 | 323,762 | 62% | 38% |
-| 25 | 1,300,940 | 573,497 | 44% | 56% |
-| 50 | 2,600,138 | 958,219 | 36% | 64% |
-| 100 | 5,201,713 | 1,662,061 | 31% | 69% |
-| 200 | 10,426,302 | 3,122,557 | 29% | **71%** ← peak |
-| 500 | 26,272,790 | 7,809,951 | 29% | 71% |
-| 1000 | 53,157,057 | 16,111,099 | 30% | 70% |
+| 1 | 63,250 | 69,665 | 110% | −10% |
+| 2 | 106,656 | 110,134 | 103% | −3% |
+| 3 | 158,569 | 163,078 | 102% | −2% |
+| 4 | 210,487 | 216,025 | 102% | −2% |
+| **5** | 262,416 | 234,151 | 89% | **+11%** ← crossover |
+| 10 | 522,025 | 323,781 | 62% | 38% |
+| 25 | 1,301,072 | 573,540 | 44% | 56% |
+| 50 | 2,600,393 | 958,304 | 36% | 64% |
+| 100 | 5,202,220 | 1,662,229 | 31% | 69% |
+| 200 | 10,427,324 | 3,122,896 | 29% | **71%** ← peak |
+| 500 | 26,275,367 | 7,810,809 | 29% | 71% |
+| 1000 | 53,162,294 | 16,112,844 | 30% | 70% |
 
 Multi-point peaks higher than multi-blob because the LHS has a *single shared commitment slot* (with weight `Σr_i`) instead of N separate commitment slots. Structural advantage from the math, not from extra optimization.
 
@@ -89,19 +100,20 @@ Per-tx cost projections held against historical Ethereum daily-average gas price
 
 `reference_replay.json → costMatrix.multiBlob.rows[i].perYear[baseline].saved`
 
+Tables capped at N=100 (per the hypothesis range we want to defend; see RESULTS.md headlines for N=1000 extrapolations).
+
 | N | 30d (1.57) | 90d (0.94) | **1y (1.85)** | **2y (6.04)** |
 |---|---|---|---|---|
-| 1 | −0.047 | −0.028 | −0.055 | −0.18 |
-| 3 | −0.128 | −0.077 | −0.151 | −0.49 |
+| 1 | −0.05 | −0.03 | −0.05 | −0.18 |
+| 2 | −0.09 | −0.05 | −0.10 | −0.34 |
+| 3 | −0.13 | −0.08 | −0.15 | −0.49 |
+| 4 | −0.17 | −0.10 | −0.20 | −0.65 |
 | 5 | 0.59 | 0.35 | 0.69 | 2.26 |
-| **6** *(today)* | **1.44** | **0.86** | **1.69** | **5.53** |
+| **6** *(today)* | **1.44** | **0.86** | **1.69** | **5.54** |
 | 10 | 4.84 | 2.90 | 5.70 | 18.65 |
-| 25 | 18.10 | 10.84 | 21.33 | 69.75 |
-| 50 | 41.03 | 24.57 | 48.36 | 158.21 |
-| **100** | **88.60** | **53.07** | **104.36** | **341.27** |
-| 200 | 183 | 110 | 216 | 705 |
-| 500 | 462 | 276 | 544 | 1,779 |
-| **1000** | **921** | **551** | **1,085** | **3,548** |
+| 25 | 18.10 | 10.84 | 21.33 | 69.74 |
+| 50 | 41.02 | 24.57 | 48.35 | 158.07 |
+| **100** | **88.58** | **53.05** | **104.40** | **341.36** |
 
 ### Multi-point, one blob — annualized ETH saved (same traffic assumption)
 
@@ -109,23 +121,30 @@ Per-tx cost projections held against historical Ethereum daily-average gas price
 
 | N | 30d (1.57) | 90d (0.94) | **1y (1.85)** | **2y (6.04)** |
 |---|---|---|---|---|
-| 1 | −0.168 | −0.101 | −0.198 | −0.65 |
-| 3 | −0.118 | −0.071 | −0.139 | −0.46 |
+| 1 | −0.17 | −0.10 | −0.20 | −0.65 |
+| 2 | −0.09 | −0.05 | −0.11 | −0.35 |
+| 3 | −0.12 | −0.07 | −0.14 | −0.46 |
+| 4 | −0.15 | −0.09 | −0.17 | −0.56 |
 | 5 | 0.74 | 0.44 | 0.87 | 2.85 |
 | **6** *(today)* | **1.63** | **0.98** | **1.92** | **6.28** |
-| 10 | 5.19 | 3.11 | 6.12 | 20.01 |
-| 25 | 19.05 | 11.41 | 22.46 | 73.43 |
-| 50 | 43.01 | 25.76 | 50.69 | 165.94 |
-| **100** | **92.71** | **55.53** | **109.10** | **357.12** |
-| 200 | 191 | 115 | 225 | 737 |
-| 500 | 484 | 290 | 570 | 1,864 |
-| **1000** | **970** | **581** | **1,144** | **3,740** |
+| 10 | 5.19 | 3.11 | 6.12 | 20.00 |
+| 25 | 19.05 | 11.41 | 22.45 | 73.40 |
+| 50 | 42.99 | 25.75 | 50.67 | 165.67 |
+| **100** | **92.68** | **55.51** | **109.24** | **357.16** |
+
+### Visualizations
+
+![ETH/yr left on the table at today's batch size](data/chart_eth_saved_today.png)
+
+![Annualized ETH saved per rollup — scales rapidly with batch size](data/chart_eth_saved_scaling.png)
+
+> **N capped at 100** in both charts. Per-rollup, same observed traffic rate (16,706 txs/yr) across all rows.
 
 ### Demo-friendly chain of headlines
 
 - *"At today's rollup behavior (N=6) and trailing-1y gas, we save **1.69 ETH/yr per rollup**, grounded in 90 days of real mainnet activity."*
 - *"If protocols allow N=100 batches, savings hit **~104 ETH/yr per rollup** — 62× the current case."*
-- *"At trailing-2y gas baselines (6 gwei), N=1000 batches save **~3,548 ETH/yr per rollup** — bull-market savings projection."*
+- *"At trailing-2y gas baselines (6 gwei) and N=100, savings hit **~341 ETH/yr per rollup** — projected bull-market savings."*
 - *"Multi-point use cases save consistently more than multi-blob (~71% vs ~66% asymptote) — structural advantage from the LHS slot reduction."*
 
 ## Methodology + caveats

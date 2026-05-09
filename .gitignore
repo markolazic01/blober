@@ -15,3 +15,7 @@ docs/
 
 # Node tooling under benchmarks/scripts (generate_fixtures.ts deps)
 node_modules/
+
+# Python venv for chart generation (benchmarks/.venv)
+.venv/
+__pycache__/

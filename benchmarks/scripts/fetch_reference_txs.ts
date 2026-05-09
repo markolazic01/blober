@@ -345,7 +345,7 @@ async function main() {
     // Two scenarios share the same gas-price baselines and traffic assumption,
     // but use different gas curves (multi-blob vs multi-point) since each maps
     // to a different verifier function and a different protocol pattern.
-    const COST_NS = [1, 3, 5, 6, 10, 25, 50, 100, 200, 500, 1000];
+    const COST_NS = [1, 2, 3, 4, 5, 6, 10, 25, 50, 100, 200, 500, 1000];
     const costBaselines = [
         { key: "last30d", label: `trailing 30d (${baselines.last30d.toFixed(2)} gwei)`, gwei: baselines.last30d },
         { key: "last90d", label: `trailing 90d (${baselines.last90d.toFixed(2)} gwei)`, gwei: baselines.last90d },

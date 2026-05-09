@@ -2,63 +2,75 @@
 
 Gas comparison and demo data for `blob-verifier`'s batched KZG verification (EIP-2537) versus the industry-standard EIP-4844 loop pattern (`0x0A` per blob).
 
+➡ **Headline numbers, charts, and full methodology are in [`RESULTS.md`](RESULTS.md).**
+
 ## Why this exists
 
-Production rollups today verify multiple blob openings by looping the EIP-4844 point-evaluation precompile (`0x0A`) per blob. Our `blob-verifier` uses EIP-2537's BLS12-381 precompiles (`0x0C`, `0x0F`) to do **batched** verification with one pairing check across all blobs. This directory measures the gap — synthetically and against real mainnet workloads of representative production rollup contracts.
+Production rollups today verify multiple blob openings by looping the EIP-4844 point-evaluation precompile (`0x0A`) per blob. Our `blob-verifier` uses EIP-2537's BLS12-381 precompiles (`0x0C`, `0x0F`) to do **batched** verification with one pairing check across all blobs. This directory measures the gap — synthetically (Foundry tests) and against real mainnet workloads (90-day replay of a representative production rollup).
 
-## Demo narrative
+## Demo narrative — five-beat story
 
-Five-beat story for the demo:
+1. **The standard.** A textbook loop of `0x0A` per blob is what every production rollup using EIP-4844 does today (we ship `LoopVerifier.sol` as a stripped reference).
+2. **The asymptote.** Per-blob loop cost ≈ 50k gas. Per-blob marginal of batched ≈ 14k. Linear → near-constant amortization.
+3. **The diff.** A 30-line per-blob loop becomes one library call. Drop-in replacement (modulo 48→128 byte G1 encoding).
+4. **The chart.** Gas vs N — two curves cross at N=5, batched dominates asymptotically (~66% saved at N=200). See `data/chart_gas_curves.svg`.
+5. **The replay.** 4,102 real KZG state-update txs from a representative rollup over 90 days, batched-cost computed against actual gas prices. 0.172 ETH saved at observed gas; **104 ETH/yr per rollup if N grows to 100**.
 
-1. **The standard.** Show a deployed industry-reference verifier — a textbook loop of `0x0A` per blob (this is what every production rollup using EIP-4844 does today).
-2. **The asymptote.** Per-blob loop cost ≈ 50k gas. Per-blob marginal of batched ≈ 6k. Linear → near-constant.
-3. **The diff.** A 30-line per-blob loop becomes one library call. Drop-in replacement (modulo 48→128 byte encoding).
-4. **The chart.** Gas vs N, two curves diverge after N ≈ 5–7. Asymptotic dominance is the headline.
-5. **The replay.** Pick a recent KZG-based state-update tx from a representative production rollup, compute hypothetical batched cost, show concrete dollars saved.
+## Layout
 
-## Plan
+| Path | Purpose |
+|---|---|
+| `foundry.toml` | Foundry config; remaps `blob-verifier/` → `../src/` |
+| `src/LoopVerifier.sol` | Stripped industry-standard `0x0A`-loop verifier — the comparison reference |
+| `src/BatchedVerifier.sol` | Thin wrapper around `BlobVerifier` for the comparison harness |
+| `test/Compare.t.sol` | Side-by-side gas measurement, both verifiers on identical inputs |
+| `scripts/generate_fixtures.ts` | `c-kzg`-bound fixture generator (real KZG proofs) |
+| `scripts/fetch_reference_txs.ts` | 90-day mainnet replay (Blockscout + public RPC, no API keys) |
+| `scripts/generate_charts.py` | Builds the demo PNGs from the CSVs (matplotlib) |
+| `data/fixtures_multi_blob.json` | 1000 random blobs at z=1 (input) |
+| `data/fixtures_multi_point.json` | 1 blob at 1000 distinct z (input) |
+| `data/synthetic_gas_multi_blob_one_point.csv` | Output: `forge test` regenerates |
+| `data/synthetic_gas_multi_point_one_blob.csv` | Output: `forge test` regenerates |
+| `data/avg_gas_price_daily.csv` | Etherscan historical export, 2015–2026 |
+| `data/reference_replay.json` | 4102-tx mainnet replay + cost matrices |
+| `data/chart_gas_curves_multi_blob.png` | Multi-blob gas curves (N up to 100) |
+| `data/chart_gas_curves_multi_point.png` | Multi-point gas curves (N up to 100) |
+| `data/chart_savings.png` | Combined % savings chart |
+| `data/chart_eth_saved_today.png` | ETH/yr saved at today's N=6 across 4 gas baselines |
+| `data/chart_eth_saved_scaling.png` | ETH/yr saved vs N (1→100), one line per gas baseline |
+| `RESULTS.md` | Full results, methodology, caveats |
 
-### Phase 0 — scaffolding *(done)*
-- Foundry mini-project remapping to `../src/` (parent `blob-verifier`)
-- README with the demo narrative outline
+## How to run
 
-### Phase 1 — synthetic benchmarks
-- Port the industry-standard `verifyKzgProofs` loop pattern into `src/LoopVerifier.sol`
-- Generate fixtures up to N≈500 using real `c-kzg-4844` Node bindings (c-kzg test vectors top out at N=6)
-- Foundry test runs both verifiers across N ∈ {1, 3, 5, 10, 25, 50, 100, 200, 500}; emits `data/synthetic_gas.csv`
-- Fit a linear model: `gas_batched = a + b·N`. Lock `(a, b)` for downstream replay calculations.
+From `benchmarks/scripts/`:
 
-### Phase 2 — mainnet replay ⭐
-- Pull 30–50 recent KZG state-update txs from a representative production rollup contract via `cast` + etherscan
-- Parse `nBlobs` from each tx's calldata; capture actual gas used + gas price + ETH/USD
-- Compute hypothetical batched gas (using `(a, b)` from Phase 1), saved gas, saved USD
-- Aggregate to a quarterly figure → `data/reference_replay.json`
+```bash
+npm install            # one-time, installs c-kzg + @noble/curves + tsx
+npm run generate       # regenerates the two fixture JSONs (~50s)
+```
 
-### Phase 3 — visualization & narrative
-- Charts (gas vs N curve; savings histogram across mainnet replay)
-- `report.md` with the headline numbers and demo talking points
-- Slides
+From `benchmarks/`:
 
-## Layout (target)
+```bash
+forge test -vv         # regenerates both synthetic_gas_*.csv (~5s)
+```
 
-| Path | Phase | Contents |
-|---|---|---|
-| `foundry.toml` | 0 | Project config; remaps `blob-verifier/` → `../src/` |
-| `src/LoopVerifier.sol` | 1 | Port of an industry-standard `0x0A`-loop verifier for direct comparison |
-| `test/Compare.t.sol` | 1 | Side-by-side gas measurement, both verifiers on identical inputs |
-| `data/synthetic_gas.csv` | 1 | Output: `N, gas_loop, gas_batched, ratio` |
-| `data/fixtures_*.json` | 1 | N-up-to-500 KZG fixtures for the benchmark suite |
-| `scripts/generate_fixtures.mjs` | 1 | `c-kzg-4844`-bound fixture generator |
-| `scripts/fetch_reference_txs.mjs` | 2 | Etherscan pull + calldata decoder |
-| `data/reference_replay.json` | 2 | Output: per-tx hypothetical savings |
-| `report.md` | 3 | Demo numbers + talking points |
+From `benchmarks/scripts/`:
 
-## Headline numbers we want to mine
+```bash
+npm run replay         # regenerates reference_replay.json (~45s, ~4000 txs)
+```
 
-| # | Number | Source |
-|---|---|---|
-| 1 | "**X% gas saved at N=100**" | Phase 1 synthetic |
-| 2 | "**$Y saved on a reference rollup's last 30 days**" | Phase 2 replay |
-| 3 | "**Crossover at N=Z**" | Phase 1 fit |
-| 4 | "**Annualized $ projection if rollups adopted this**" | Phase 2 aggregate |
-| 5 | "**Bytecode / API surface diff**" | Phase 1 (counted from sources) |
+Knobs (env vars):
+
+```bash
+WINDOW_DAYS=90 MAX_SAMPLE=5000 RPC_CONCURRENCY=10 npm run replay
+```
+
+To regenerate the PNG charts (one-time venv setup, then run anytime):
+
+```bash
+cd benchmarks
+python3 -m venv .venv && .venv/bin/pip install matplotlib
+.venv/bin/python scripts/generate_charts.py
+```

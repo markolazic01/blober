@@ -55,7 +55,7 @@ contract Compare is Test {
     bytes[] mpProofsCompressed;
     bytes[] mpProofsUncompressed;
 
-    uint256[14] internal SWEEP = [uint256(1), 3, 5, 10, 25, 50, 100, 150, 200, 300, 400, 500, 700, 1000];
+    uint256[16] internal SWEEP = [uint256(1), 2, 3, 4, 5, 10, 25, 50, 100, 150, 200, 300, 400, 500, 700, 1000];
 
     function setUp() public {
         loopVerifier = new LoopVerifier();
@@ -168,7 +168,7 @@ contract Compare is Test {
         returns (string memory)
     {
         uint256 ratio = gasLoop == 0 ? 0 : (gasBatched * 100) / gasLoop;
-        uint256 saved = ratio >= 100 ? 0 : 100 - ratio;
+        int256 saved = int256(100) - int256(ratio);
         return string.concat(
             csv,
             vm.toString(n),
