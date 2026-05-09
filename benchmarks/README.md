@@ -2,7 +2,7 @@
 
 Gas comparison and demo data for `blob-verifier`'s batched KZG verification (EIP-2537) versus the industry-standard EIP-4844 loop pattern (`0x0A` per blob).
 
-➡ **Headline numbers, charts, and full methodology are in [`RESULTS.md`](RESULTS.md).**
+➡ **Headline numbers, charts, and full methodology are in the project [`README.md`](../README.md#benchmarking-results).**
 
 ## Why this exists
 
@@ -38,7 +38,7 @@ Production rollups today verify multiple blob openings by looping the EIP-4844 p
 | `data/chart_savings.png` | Combined % savings chart |
 | `data/chart_eth_saved_today.png` | ETH/yr saved at today's N=6 across 4 gas baselines |
 | `data/chart_eth_saved_scaling.png` | ETH/yr saved vs N (1→100), one line per gas baseline |
-| `RESULTS.md` | Full results, methodology, caveats |
+| `../README.md` (root) | Full results, methodology, caveats |
 
 ## How to run
 
