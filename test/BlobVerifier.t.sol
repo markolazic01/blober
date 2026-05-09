@@ -32,6 +32,13 @@ contract BlobVerifierTest is Test {
         bytes32(uint256(52435875175126190479447740508185965837690552500527637822603658699938581184513))
     );
 
+    // Point 1 Data - Valid Blob
+    bytes32 constant BLOB_1_VERSIONED_COMMITMENT_HASH = 0x01cf45213dd7b4716864d378f3c6d861467987e4d94b7f79a1f814a697e38637;
+    bytes constant BLOB_1_COMMITMENT = bytes(hex'a572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e');
+    bytes32 constant BLOB_1_POINT_1_Z = 0x0000000000000000000000000000000000000000000000000000000000000000;
+    bytes32 constant BLOB_1_POINT_1_Y = 0x0000000000000000000000000000000000000000000000000000000000000002;
+    bytes constant BLOB_1_POINT_PROOF = bytes(hex'c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000');
+
     // ── Setup ───────────────────────────────────────────────────────────
 
     function setUp() public {
@@ -235,11 +242,10 @@ contract BlobVerifierTest is Test {
     // ════════════════════════════════════════════════════════════════════
 
     function test_verifySinglePointByIndex_success() public {
-        _setSingleBlobHash(BLOB_HASH_1);
-        _mockPrecompileSuccess(BLOB_HASH_1, Z_VALUE, Y_VALUE, DUMMY_COMMITMENT, DUMMY_PROOF);
+        _setSingleBlobHash(BLOB_1_VERSIONED_COMMITMENT_HASH);
 
         // Should not revert
-        harness.verifySinglePointByIndex(0, Z_VALUE, Y_VALUE, DUMMY_COMMITMENT, DUMMY_PROOF);
+        harness.verifySinglePointByIndex(0, BLOB_1_POINT_1_Z, BLOB_1_POINT_1_Y, BLOB_1_COMMITMENT, BLOB_1_POINT_PROOF);
     }
 
     function test_verifySinglePointByIndex_reverts_noBlobAtIndex() public {
