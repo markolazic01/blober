@@ -1,0 +1,18 @@
+{
+  "name": "scripts",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "generate": "tsx generate_fixtures.ts",
+    "replay": "tsx fetch_reference_txs.ts"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.2.0",
+    "c-kzg": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}
