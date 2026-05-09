@@ -246,6 +246,14 @@ contract BlobVerifierTest is Test {
         harness.verifySinglePointByHash(vh, badProof.z, badProof.y, badProof.commitment, badProof.proof);
     }
 
+    function test_verifySinglePointByHash_reverts_invalidVersion() public {
+        // _checkHashPrefix runs before any other validation, so input lengths/values don't matter
+        vm.expectRevert(abi.encodeWithSelector(BlobVerifier.InvalidVersionedHashVersion.selector, bytes1(0x02)));
+        harness.verifySinglePointByHash(
+            INVALID_VERSION_HASH, validProof.z, validProof.y, validProof.commitment, validProof.proof
+        );
+    }
+
     // ════════════════════════════════════════════════════════════════════
     //  Input length validation (both overloads share _verifySinglePoint)
     // ════════════════════════════════════════════════════════════════════
