@@ -3,6 +3,8 @@ src = "src"
 out = "out"
 libs = ["lib"]
 evm_version = "osaka"
+via_ir = true
+optimizer = true
 fs_permissions = [{ access = "read", path = "./test/fixtures" }]
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

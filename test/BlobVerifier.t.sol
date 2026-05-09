@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {BlobVerifier} from "../src/BlobVerifier.sol";
+import {Bls12381} from "../src/Bls12381.sol";
 import {BlobVerifierHarness} from "./BlobVerifierHarness.sol";
 
 contract BlobVerifierTest is Test {
@@ -18,6 +19,29 @@ contract BlobVerifierTest is Test {
     Kzg validProof; // correct_proof_1_0:    non-trivial commitment, valid opening (P(0) = 2)
     Kzg zeroProof; // correct_proof_0_0:    zero polynomial, commitment & proof at infinity
     Kzg badProof; // incorrect_proof_1_0:  same input as validProof but wrong proof (G1 generator)
+
+    /// @dev 128-byte (uncompressed) fixture for verifyMultiplePoints128.
+    ///      Many points, one blob — six openings of poly 2 (correct_proof_2_0..5).
+    struct KzgMultiPointOneBlob {
+        bytes commitment; // 128 bytes, shared
+        bytes32[] z; // 6 elements
+        bytes32[] y; // 6 elements
+        bytes[] proofs; // 6 elements, 128 bytes each
+    }
+
+    KzgMultiPointOneBlob multiPointOneBlob;
+
+    /// @dev 128-byte (uncompressed) fixture for verifySinglePointMultipleBlobs128.
+    ///      Many blobs, one point — three blobs (polys 2, 3, 4) opened at the same z.
+    struct KzgMultiBlobOnePoint {
+        bytes32 z; // shared
+        bytes[] commitments; // 3 elements, 128 bytes each
+        bytes32[] y; // 3 elements
+        bytes[] proofs; // 3 elements, 128 bytes each
+    }
+
+    KzgMultiBlobOnePoint multiBlobOnePoint; // z = 0 (degenerate path: r_i·z = 0)
+    KzgMultiBlobOnePoint multiBlobOnePointZ1; // z = 1 (full LHS proof slots exercised)
 
     // ── Test constants ──────────────────────────────────────────────────
 
@@ -42,6 +66,9 @@ contract BlobVerifierTest is Test {
         validProof = _load("correct_proof_1_0");
         zeroProof = _load("correct_proof_0_0");
         badProof = _load("incorrect_proof_1_0");
+        multiPointOneBlob = _loadMultiPointOneBlob("multi_point_one_blob_128");
+        multiBlobOnePoint = _loadMultiBlobOnePoint("multi_blob_one_point_128");
+        multiBlobOnePointZ1 = _loadMultiBlobOnePoint("multi_blob_one_point_z1_128");
     }
 
     function _load(string memory name) internal view returns (Kzg memory f) {
@@ -50,6 +77,22 @@ contract BlobVerifierTest is Test {
         f.z = vm.parseJsonBytes32(j, ".z");
         f.y = vm.parseJsonBytes32(j, ".y");
         f.proof = vm.parseJsonBytes(j, ".proof");
+    }
+
+    function _loadMultiPointOneBlob(string memory name) internal view returns (KzgMultiPointOneBlob memory f) {
+        string memory j = vm.readFile(string.concat("test/fixtures/", name, ".json"));
+        f.commitment = vm.parseJsonBytes(j, ".commitment");
+        f.z = vm.parseJsonBytes32Array(j, ".z");
+        f.y = vm.parseJsonBytes32Array(j, ".y");
+        f.proofs = vm.parseJsonBytesArray(j, ".proofs");
+    }
+
+    function _loadMultiBlobOnePoint(string memory name) internal view returns (KzgMultiBlobOnePoint memory f) {
+        string memory j = vm.readFile(string.concat("test/fixtures/", name, ".json"));
+        f.z = vm.parseJsonBytes32(j, ".z");
+        f.commitments = vm.parseJsonBytesArray(j, ".commitments");
+        f.y = vm.parseJsonBytes32Array(j, ".y");
+        f.proofs = vm.parseJsonBytesArray(j, ".proofs");
     }
 
     function _setSingleBlobHash(bytes32 h) internal {
@@ -300,5 +343,213 @@ contract BlobVerifierTest is Test {
 
         harness.verifySinglePointByIndex(0, validProof.z, validProof.y, validProof.commitment, validProof.proof);
         harness.verifySinglePointByIndex(1, zeroProof.z, zeroProof.y, zeroProof.commitment, zeroProof.proof);
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    //  verifyMultiplePoints128 (one blob, multiple openings, batched pairing)
+    // ════════════════════════════════════════════════════════════════════
+
+    function test_verifyMultiplePoints128_success() public view {
+        bytes32 blobHash = _blobHashFor(multiPointOneBlob.commitment);
+
+        harness.verifyMultiplePoints128(
+            blobHash, multiPointOneBlob.z, multiPointOneBlob.y, multiPointOneBlob.commitment, multiPointOneBlob.proofs
+        );
+    }
+
+    function test_verifyMultiplePoints128_reverts_badProof() public {
+        bytes32 blobHash = _blobHashFor(multiPointOneBlob.commitment);
+
+        // Replace proofs[0] with G1_GENERATOR — a valid G1 point but not the right proof.
+        bytes[] memory tamperedProofs = multiPointOneBlob.proofs;
+        tamperedProofs[0] = BlobVerifier.G1_GENERATOR;
+
+        vm.expectRevert(BlobVerifier.PairingCheckFailed.selector);
+        harness.verifyMultiplePoints128(
+            blobHash, multiPointOneBlob.z, multiPointOneBlob.y, multiPointOneBlob.commitment, tamperedProofs
+        );
+    }
+
+    function test_verifyMultiplePoints128_reverts_commitmentMismatch() public {
+        bytes32 wrongHash = bytes32(uint256(0xdeadbeef));
+        bytes32 actualHash = _blobHashFor(multiPointOneBlob.commitment);
+
+        vm.expectRevert(abi.encodeWithSelector(BlobVerifier.CommitmentMismatch.selector, wrongHash, actualHash));
+        harness.verifyMultiplePoints128(
+            wrongHash, multiPointOneBlob.z, multiPointOneBlob.y, multiPointOneBlob.commitment, multiPointOneBlob.proofs
+        );
+    }
+
+    function test_verifyMultiplePoints128_reverts_invalidScalar_y() public {
+        bytes32 blobHash = _blobHashFor(multiPointOneBlob.commitment);
+
+        // y exactly at the modulus is the boundary case — must be rejected.
+        bytes32[] memory tamperedY = multiPointOneBlob.y;
+        tamperedY[0] = BlobVerifier.BLS_MODULUS;
+
+        vm.expectRevert(abi.encodeWithSelector(BlobVerifier.InvalidScalar.selector, BlobVerifier.BLS_MODULUS));
+        harness.verifyMultiplePoints128(
+            blobHash, multiPointOneBlob.z, tamperedY, multiPointOneBlob.commitment, multiPointOneBlob.proofs
+        );
+    }
+
+    function test_verifyMultiplePoints128_reverts_invalidScalar_z() public {
+        bytes32 blobHash = _blobHashFor(multiPointOneBlob.commitment);
+
+        bytes32[] memory tamperedZ = multiPointOneBlob.z;
+        tamperedZ[0] = BlobVerifier.BLS_MODULUS;
+
+        vm.expectRevert(abi.encodeWithSelector(BlobVerifier.InvalidScalar.selector, BlobVerifier.BLS_MODULUS));
+        harness.verifyMultiplePoints128(
+            blobHash, tamperedZ, multiPointOneBlob.y, multiPointOneBlob.commitment, multiPointOneBlob.proofs
+        );
+    }
+
+    function test_verifyMultiplePoints128_reverts_badProofLength() public {
+        bytes32 blobHash = _blobHashFor(multiPointOneBlob.commitment);
+
+        bytes[] memory tamperedProofs = multiPointOneBlob.proofs;
+        tamperedProofs[0] = new bytes(96); // wrong length — should be 128
+
+        vm.expectRevert(abi.encodeWithSelector(BlobVerifier.InvalidProofLength.selector, 96));
+        harness.verifyMultiplePoints128(
+            blobHash, multiPointOneBlob.z, multiPointOneBlob.y, multiPointOneBlob.commitment, tamperedProofs
+        );
+    }
+
+    function test_verifyMultiplePoints128_reverts_arrayLengthMismatch() public {
+        bytes32 blobHash = _blobHashFor(multiPointOneBlob.commitment);
+
+        // Build a shorter y array (one less element than z) to trigger the length check.
+        bytes32[] memory shortY = new bytes32[](multiPointOneBlob.y.length - 1);
+        for (uint256 i; i < shortY.length; ++i) shortY[i] = multiPointOneBlob.y[i];
+
+        vm.expectRevert(BlobVerifier.ArrayLengthMismatch.selector);
+        harness.verifyMultiplePoints128(
+            blobHash, multiPointOneBlob.z, shortY, multiPointOneBlob.commitment, multiPointOneBlob.proofs
+        );
+    }
+
+    function test_verifyMultiplePoints128_reverts_empty() public {
+        // n == 0 check fires before any commitment/scalar work.
+        bytes32[] memory empty32 = new bytes32[](0);
+        bytes[] memory emptyBytes = new bytes[](0);
+
+        vm.expectRevert(BlobVerifier.ArrayLengthMismatch.selector);
+        harness.verifyMultiplePoints128(bytes32(0), empty32, empty32, multiPointOneBlob.commitment, emptyBytes);
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    //  verifySinglePointMultipleBlobs128 (many blobs, one point, batched pairing)
+    // ════════════════════════════════════════════════════════════════════
+
+    function test_verifySinglePointMultipleBlobs128_z0_success() public view {
+        _runMultiBlobOnePointSuccess(multiBlobOnePoint);
+    }
+
+    function test_verifySinglePointMultipleBlobs128_z1_success() public view {
+        // z=1 — exercises the Σ(r_i·z)·π_i term in the LHS that's zeroed at z=0.
+        _runMultiBlobOnePointSuccess(multiBlobOnePointZ1);
+    }
+
+    function test_verifySinglePointMultipleBlobs128_reverts_badProof() public {
+        // Use the z=1 fixture so proofs actually weigh into the LHS math (not just the RHS).
+        KzgMultiBlobOnePoint memory f = multiBlobOnePointZ1;
+        bytes32[] memory blobHashes = _blobHashesFor(f.commitments);
+
+        // Replace proofs[0] with G1_GENERATOR — a valid G1 point that is not the right proof.
+        bytes[] memory tamperedProofs = f.proofs;
+        tamperedProofs[0] = BlobVerifier.G1_GENERATOR;
+
+        vm.expectRevert(BlobVerifier.PairingCheckFailed.selector);
+        harness.verifySinglePointMultipleBlobs128(blobHashes, f.z, f.y, f.commitments, tamperedProofs);
+    }
+
+    function test_verifySinglePointMultipleBlobs128_reverts_commitmentMismatch() public {
+        KzgMultiBlobOnePoint memory f = multiBlobOnePoint;
+        bytes32[] memory blobHashes = _blobHashesFor(f.commitments);
+
+        bytes32 wrongHash = bytes32(uint256(0xdeadbeef));
+        bytes32 actualHash = blobHashes[0]; // capture before overwriting
+        blobHashes[0] = wrongHash;
+
+        vm.expectRevert(abi.encodeWithSelector(BlobVerifier.CommitmentMismatch.selector, wrongHash, actualHash));
+        harness.verifySinglePointMultipleBlobs128(blobHashes, f.z, f.y, f.commitments, f.proofs);
+    }
+
+    function test_verifySinglePointMultipleBlobs128_reverts_invalidScalar_y() public {
+        KzgMultiBlobOnePoint memory f = multiBlobOnePoint;
+        bytes32[] memory blobHashes = _blobHashesFor(f.commitments);
+
+        bytes32[] memory tamperedY = f.y;
+        tamperedY[0] = BlobVerifier.BLS_MODULUS;
+
+        vm.expectRevert(abi.encodeWithSelector(BlobVerifier.InvalidScalar.selector, BlobVerifier.BLS_MODULUS));
+        harness.verifySinglePointMultipleBlobs128(blobHashes, f.z, tamperedY, f.commitments, f.proofs);
+    }
+
+    function test_verifySinglePointMultipleBlobs128_reverts_invalidScalar_z() public {
+        KzgMultiBlobOnePoint memory f = multiBlobOnePoint;
+        bytes32[] memory blobHashes = _blobHashesFor(f.commitments);
+
+        // z is singular here (vs. an array in verifyMultiplePoints128).
+        vm.expectRevert(abi.encodeWithSelector(BlobVerifier.InvalidScalar.selector, BlobVerifier.BLS_MODULUS));
+        harness.verifySinglePointMultipleBlobs128(blobHashes, BlobVerifier.BLS_MODULUS, f.y, f.commitments, f.proofs);
+    }
+
+    function test_verifySinglePointMultipleBlobs128_reverts_badProofLength() public {
+        KzgMultiBlobOnePoint memory f = multiBlobOnePoint;
+        bytes32[] memory blobHashes = _blobHashesFor(f.commitments);
+
+        bytes[] memory tamperedProofs = f.proofs;
+        tamperedProofs[0] = new bytes(96);
+
+        vm.expectRevert(abi.encodeWithSelector(BlobVerifier.InvalidProofLength.selector, 96));
+        harness.verifySinglePointMultipleBlobs128(blobHashes, f.z, f.y, f.commitments, tamperedProofs);
+    }
+
+    function test_verifySinglePointMultipleBlobs128_reverts_arrayLengthMismatch() public {
+        KzgMultiBlobOnePoint memory f = multiBlobOnePoint;
+        bytes32[] memory blobHashes = _blobHashesFor(f.commitments);
+
+        // Shorten commitments by one to break the n != commitments.length check.
+        bytes[] memory shortCommitments = new bytes[](f.commitments.length - 1);
+        for (uint256 i; i < shortCommitments.length; ++i) shortCommitments[i] = f.commitments[i];
+
+        vm.expectRevert(BlobVerifier.ArrayLengthMismatch.selector);
+        harness.verifySinglePointMultipleBlobs128(blobHashes, f.z, f.y, shortCommitments, f.proofs);
+    }
+
+    function test_verifySinglePointMultipleBlobs128_reverts_empty() public {
+        // n == 0 check fires first, before z bounds or commitment binding.
+        bytes32[] memory empty32 = new bytes32[](0);
+        bytes[] memory emptyBytes = new bytes[](0);
+
+        vm.expectRevert(BlobVerifier.ArrayLengthMismatch.selector);
+        harness.verifySinglePointMultipleBlobs128(empty32, bytes32(0), empty32, emptyBytes, emptyBytes);
+    }
+
+    /// @dev Derive the per-commitment versioned hash array used as `blobHashes` input.
+    function _blobHashesFor(bytes[] memory commitments) internal pure returns (bytes32[] memory hashes) {
+        hashes = new bytes32[](commitments.length);
+        for (uint256 i; i < commitments.length; ++i) {
+            hashes[i] = _blobHashFor(commitments[i]);
+        }
+    }
+
+    /// @dev Shared happy-path runner: derive each blobHash from the loaded commitment, call.
+    function _runMultiBlobOnePointSuccess(KzgMultiBlobOnePoint memory f) internal view {
+        bytes32[] memory blobHashes = new bytes32[](f.commitments.length);
+        for (uint256 i; i < f.commitments.length; ++i) {
+            blobHashes[i] = _blobHashFor(f.commitments[i]);
+        }
+
+        harness.verifySinglePointMultipleBlobs128(blobHashes, f.z, f.y, f.commitments, f.proofs);
+    }
+
+    /// @dev Derive the EIP-4844 versioned hash from a 128-byte uncompressed G1 commitment.
+    ///      Used by the *128 happy-path tests to construct the blobHash the verifier expects.
+    function _blobHashFor(bytes memory uncompressed) internal pure returns (bytes32) {
+        return BlobVerifier.commitmentToVersionedHash(Bls12381.compress(uncompressed));
     }
 }
