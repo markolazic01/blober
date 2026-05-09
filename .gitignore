@@ -1,4 +1,4 @@
-# Compiler files
+# Compiler files (Foundry; matches both root and benchmarks/)
 cache/
 out/
 
@@ -12,3 +12,6 @@ docs/
 
 # Dotenv file
 .env
+
+# Node tooling under benchmarks/scripts (generate_fixtures.ts deps)
+node_modules/
