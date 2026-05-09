@@ -1,66 +1,43 @@
-## Foundry
+## Blober - On-chain Blob Verification Library in Solidity ![Tests](https://github.com/markolazic01/blob-verifier/workflows/CI/badge.svg)
+**Blober** is a Solidity library for Ethereum blob verification (and more), by introducing a well designed set of blob point verification flows it eases helps the L2 settlements. 
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+---
+### Problem Solution
+So far L2s usually build their own blob verification flows, in a non-standardized and sometimes messy way, Blober serves as a library that abstracts away the precompile interactions and makes the verification clean and efficient.
 
-Foundry consists of:
+Blober's special feature is in multi-point verifications, across multiple blobs, where by utilizing the BLS precompiles from EIP-2537 it merges the blob points into a single point, making a verification process of multiple points less costly (by much).
 
--   **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
--   **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
--   **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
--   **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+Blober also contains other utils that can help you checksum the specific blob hash, get a versioned hash from the blob data hash, check if blob is present in the tx and more! 
 
-## Documentation
+With introduction of 14 blob per block limit, Blober multi-point verification becomes increasingly effective, for L2s using Blober instead of iterative point validation, gas consumption can be reduced by up to **80%**!
 
-https://book.getfoundry.sh/
+Danksharding and Block-in-Blob EIPs can further leverage usage of Blober, potentially requiring the development of new features.
 
-## Usage
-
+---
 ### Build
-
-```shell
+```
 $ forge build
 ```
 
 ### Test
-
-```shell
-$ forge test
+```
+$ forge test --fork-url <ETH_RPC>
 ```
 
-### Format
+---
+### Usage
 
-```shell
-$ forge fmt
+#### Install
+```
+$ forge install markolazic01/blob-verifier
+```
+#### Import
+``` solidity
+pragma solidity ^0.8.30;
+
+import { BlobVerifier } from "blob-verifier/BlobVerifier.sol";
 ```
 
-### Gas Snapshots
-
-```shell
-$ forge snapshot
-```
-
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+---
+### License
+MIT
