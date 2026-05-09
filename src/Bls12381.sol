@@ -56,21 +56,19 @@ library Bls12381 {
     }
 
     /// @notice Multi-scalar multiplication on G1: returns Σ scalars[i] * points[i].
-    /// @dev Calls the BLS12_G1MSM precompile (0x0C). The precompile expects an
-    /// input laid out as [128-byte G1 point || 32-byte scalar] per entry.
+    /// @dev Convenience wrapper that builds the precompile input from parallel
+    ///      arrays. Callers that already hold a contiguous [point||scalar] buffer
+    ///      should call `g1MsmRaw` directly to skip this packing pass.
     /// @param points  G1 points (128 bytes each).
     /// @param scalars Scalars (32 bytes each); scalars[i] pairs with points[i].
-    /// @return result One G1 point (128 bytes) — the resulting sum.
-    function g1Msm(bytes[] memory points, bytes32[] memory scalars) internal view returns (bytes memory result) {
+    /// @return One G1 point (128 bytes) — the resulting sum.
+    function g1Msm(bytes[] memory points, bytes32[] memory scalars) internal view returns (bytes memory) {
         uint256 n = points.length;
         if (n == 0) revert EmptyInput();
         if (n != scalars.length) revert LengthMismatch();
 
-        // The precompile expects one contiguous buffer of n slots, each slot
-        // = [128-byte G1 point || 32-byte scalar] = 160 bytes. We allocate the
-        // final-size buffer up front and write each slot directly into it, so
-        // total memory traffic is O(n). (Repeated abi.encodePacked would be
-        // O(n²) — each iteration re-allocates and re-copies the running buffer.)
+        // Pre-allocate the final-size buffer (n × 160 bytes) and write each slot
+        // directly — O(n) memory traffic, vs. O(n²) for repeated abi.encodePacked.
         uint256 slotSize = G1_POINT_SIZE + 32;
         bytes memory input = new bytes(n * slotSize);
 
@@ -80,12 +78,9 @@ library Bls12381 {
             bytes32 scalar = scalars[i];
 
             // Solidity `bytes memory` layout: word-0 holds the length, payload
-            // starts at ptr + 0x20. We use mcopy (EIP-5656, Cancun) for the
-            // point and mstore for the 32-byte scalar that follows it.
-            //
-            // "memory-safe" annotation: every write lands inside `input` (which
-            // Solidity allocated above) and we don't touch the free memory
-            // pointer — so the optimizer is free to reorder memory operations.
+            // starts at ptr + 0x20. mcopy (EIP-5656, Cancun) moves the 128-byte
+            // point in one opcode; mstore writes the 32-byte scalar. Memory-safe:
+            // every write lands inside `input`, free memory pointer untouched.
             assembly ("memory-safe") {
                 let dst := add(add(input, 0x20), mul(i, slotSize))
                 mcopy(dst, add(point, 0x20), 128) // copy G1 point
@@ -93,6 +88,19 @@ library Bls12381 {
             }
         }
 
+        return g1MsmRaw(input);
+    }
+
+    /// @notice Same as `g1Msm` but takes a pre-built precompile input.
+    /// @dev    Skips the per-element copy in `g1Msm` — useful when the caller
+    ///         constructs the [point||scalar]*n buffer themselves (e.g., to
+    ///         interleave pre-known points with scalars derived in-place).
+    /// @param  input Length must be a positive multiple of 160 bytes; each slot
+    ///               is [128-byte G1 point || 32-byte scalar]. The precompile
+    ///               itself enforces canonical encoding and subgroup membership.
+    /// @return One G1 point (128 bytes) — the resulting sum.
+    function g1MsmRaw(bytes memory input) internal view returns (bytes memory) {
+        if (input.length == 0 || input.length % 160 != 0) revert EmptyInput();
         return _staticcall(G1MSM_PRECOMPILE, input, G1_POINT_SIZE);
     }
 
