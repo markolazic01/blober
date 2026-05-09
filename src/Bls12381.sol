@@ -14,8 +14,8 @@ library Bls12381 {
     //  Precompile addresses (EIP-2537)
     // ──────────────────────────────────────────────────────────────────────
 
-    address internal constant G1ADD_PRECOMPILE   = address(0x0B);
-    address internal constant G1MSM_PRECOMPILE   = address(0x0C);
+    address internal constant G1ADD_PRECOMPILE = address(0x0B);
+    address internal constant G1MSM_PRECOMPILE = address(0x0C);
     address internal constant PAIRING_PRECOMPILE = address(0x0F);
 
     // ──────────────────────────────────────────────────────────────────────
@@ -89,11 +89,42 @@ library Bls12381 {
             assembly ("memory-safe") {
                 let dst := add(add(input, 0x20), mul(i, slotSize))
                 mcopy(dst, add(point, 0x20), 128) // copy G1 point
-                mstore(add(dst, 128), scalar)     // append scalar
+                mstore(add(dst, 128), scalar) // append scalar
             }
         }
 
         return _staticcall(G1MSM_PRECOMPILE, input, G1_POINT_SIZE);
+    }
+
+    /// @notice Convert a 128-byte EIP-2537 uncompressed G1 point to its 48-byte
+    ///         EIP-4844 canonical compressed form.
+    /// @dev    Compressed encoding: top 3 bits of byte 0 are flags
+    ///           - 0x80 compression (always set)
+    ///           - 0x40 infinity (only when input is the point at infinity)
+    ///           - 0x20 y-largest (set iff y > (p-1)/2 — picks the canonical y)
+    ///         The remaining 5 bits + bytes 1..48 hold x (which fits in 381 bits
+    ///         for any canonical input, so the top 3 bits of x are always zero).
+    /// @param  uncompressed 128 bytes: [16 zero || 48-byte x || 16 zero || 48-byte y].
+    function compress(bytes memory uncompressed) internal pure returns (bytes memory compressed) {
+        _requireG1Length(uncompressed);
+        compressed = new bytes(48);
+
+        if (_isInfinity(uncompressed)) {
+            compressed[0] = 0xc0; // compression | infinity
+            return compressed;
+        }
+
+        // Copy x bytes (uncompressed[16..64]) into compressed[0..48].
+        // mcopy is a single opcode for arbitrary-length memory copy (EIP-5656); the
+        // pure-Solidity alternative would be a 48-iteration byte-by-byte loop.
+        assembly ("memory-safe") {
+            mcopy(add(compressed, 0x20), add(uncompressed, 0x30), 48)
+        }
+
+        // Mask the top 3 bits of byte 0 (defensive — always zero for valid x) and OR in flags.
+        uint8 flags = 0x80;
+        if (_yIsLarger(uncompressed)) flags |= 0x20;
+        compressed[0] = bytes1((uint8(compressed[0]) & 0x1F) | flags);
     }
 
     /// @notice Multi-pairing check: returns true iff Π e(g1Points[i], g2Points[i]) == 1 in GT.
@@ -134,6 +165,11 @@ library Bls12381 {
     //  Internals
     // ──────────────────────────────────────────────────────────────────────
 
+    /// @dev (p-1)/2 where p is the BLS12-381 base field prime, split into two uint256s.
+    // Used by `_yIsLarger` to pick the canonical y in compression.
+    uint256 private constant P_HALF_HI = 0x0D0088F51CBFF34D258DD3DB21A5D66B;
+    uint256 private constant P_HALF_LO = 0xB23BA5C279C2895FB39869507B587B120F55FFFF58A9FFFFDCFF7FFFFFFFD555;
+
     function _staticcall(address precompile, bytes memory input, uint256 expectedOutputLength)
         private
         view
@@ -151,5 +187,36 @@ library Bls12381 {
 
     function _requireG2Length(bytes memory point) private pure {
         if (point.length != G2_POINT_SIZE) revert InvalidG2PointLength(point.length);
+    }
+
+    /// @dev Point-at-infinity in EIP-2537 G1 = 128 zero bytes. OR all 4 words
+    ///      together and check for zero in one shot.
+    function _isInfinity(bytes memory point) private pure returns (bool isInf) {
+        assembly ("memory-safe") {
+            // `bytes memory` layout: word 0 holds the length; the 128-byte payload
+            // starts at +0x20. The payload is exactly four 32-byte words, so we
+            // mload each one, OR them all together, and ask "is the result zero?".
+            // If every byte is zero, the OR is zero; otherwise some bit leaks through.
+            let chunk0 := mload(add(point, 0x20)) // payload bytes 0..32
+            let chunk1 := mload(add(point, 0x40)) // payload bytes 32..64
+            let chunk2 := mload(add(point, 0x60)) // payload bytes 64..96
+            let chunk3 := mload(add(point, 0x80)) // payload bytes 96..128
+
+            // iszero maps 0 → 1 and any non-zero → 0; Solidity reads that as bool.
+            isInf := iszero(or(or(chunk0, chunk1), or(chunk2, chunk3)))
+        }
+    }
+
+    /// @dev Returns true iff y > (p-1)/2. y lives at bytes 80..128 of the
+    ///      uncompressed point (16-byte zero pad + 48-byte fp). We split it
+    ///      into a 16-byte high half and a 32-byte low half for the compare.
+    function _yIsLarger(bytes memory point) private pure returns (bool) {
+        uint256 hi;
+        uint256 lo;
+        assembly ("memory-safe") {
+            hi := shr(128, mload(add(point, 0x70))) // top 16 bytes of y
+            lo := mload(add(point, 0x80)) // bottom 32 bytes of y
+        }
+        return hi > P_HALF_HI || (hi == P_HALF_HI && lo > P_HALF_LO);
     }
 }
