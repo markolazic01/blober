@@ -8,7 +8,9 @@
 //
 // Override with environment variables if you prefer:
 //   ETH_RPC_URL          (default: https://ethereum-rpc.publicnode.com)
-//   SAMPLE_LIMIT         (default: 30)
+//   WINDOW_DAYS          (default: 90 — how far back to sample)
+//   MAX_SAMPLE           (default: 5000 — hard cap on tx count)
+//   RPC_CONCURRENCY      (default: 10 — parallel RPC requests)
 //   TX_HASHES_FILE       (overrides Blockscout fetch, one hash per line)
 //
 // Run:    npm run replay
@@ -35,7 +37,9 @@ const CONTRACT_ADDRESS = "0xc662c410C0ECf747543f5bA90660f6ABeBD9C8c4";
 const SELECTOR_KZG_DA = "0x507ee528";
 
 const RPC_URL = process.env.ETH_RPC_URL ?? "https://ethereum-rpc.publicnode.com";
-const SAMPLE_LIMIT = Number.parseInt(process.env.SAMPLE_LIMIT ?? "30", 10);
+const WINDOW_DAYS = Number.parseInt(process.env.WINDOW_DAYS ?? "90", 10);
+const MAX_SAMPLE = Number.parseInt(process.env.MAX_SAMPLE ?? "5000", 10);
+const RPC_CONCURRENCY = Number.parseInt(process.env.RPC_CONCURRENCY ?? "10", 10);
 
 const HASHES_FILE = process.env.TX_HASHES_FILE ?? join(__dirname, "tx_hashes.txt");
 const BENCHMARK_MULTI_BLOB_CSV = join(__dirname, "..", "data", "synthetic_gas_multi_blob_one_point.csv");
@@ -111,24 +115,44 @@ function interp(samples: Sample[], n: number, key: "gasLoop" | "gasBatched"): nu
 //  Tx hash sourcing
 // ──────────────────────────────────────────────────────────────────────
 
-async function fetchHashesFromBlockscout(limit: number): Promise<string[]> {
-    // Blockscout is open + free; no API key required.
-    const url = new URL("https://eth.blockscout.com/api");
-    url.searchParams.set("module", "account");
-    url.searchParams.set("action", "txlist");
-    url.searchParams.set("address", CONTRACT_ADDRESS);
-    url.searchParams.set("page", "1");
-    url.searchParams.set("offset", String(limit * 4)); // overshoot, then filter to KZG-DA selector
-    url.searchParams.set("sort", "desc");
+async function fetchHashesFromBlockscout(windowDays: number, maxSample: number): Promise<string[]> {
+    // Blockscout is open + free; no API key required. Paginates descending from
+    // the latest tx and stops once we either pass the time window or hit the cap.
+    const cutoffTs = Math.floor(Date.now() / 1000) - windowDays * 86400;
+    const PAGE_SIZE = 100;
+    const hashes: string[] = [];
+    let oldestSeenTs = Infinity;
 
-    const r = await fetch(url);
-    const j = (await r.json()) as { result?: { hash: string; input: string }[]; message?: string };
-    if (!Array.isArray(j.result)) throw new Error(`Blockscout: ${j.message ?? "unknown"}`);
+    for (let page = 1; page <= 200 /* safety */; page++) {
+        const url = new URL("https://eth.blockscout.com/api");
+        url.searchParams.set("module", "account");
+        url.searchParams.set("action", "txlist");
+        url.searchParams.set("address", CONTRACT_ADDRESS);
+        url.searchParams.set("page", String(page));
+        url.searchParams.set("offset", String(PAGE_SIZE));
+        url.searchParams.set("sort", "desc");
 
-    return j.result
-        .filter((t) => t.input?.startsWith(SELECTOR_KZG_DA))
-        .slice(0, limit)
-        .map((t) => t.hash);
+        const r = await fetch(url);
+        const j = (await r.json()) as { result?: { hash: string; input: string; timeStamp: string }[]; message?: string };
+        if (!Array.isArray(j.result) || j.result.length === 0) break;
+
+        for (const t of j.result) {
+            const ts = Number.parseInt(t.timeStamp, 10);
+            oldestSeenTs = Math.min(oldestSeenTs, ts);
+            if (ts < cutoffTs) return hashes;
+            if (t.input?.startsWith(SELECTOR_KZG_DA)) {
+                hashes.push(t.hash);
+                if (hashes.length >= maxSample) return hashes;
+            }
+        }
+        if (j.result.length < PAGE_SIZE) break; // last page
+
+        if (page % 5 === 0) {
+            const oldestAge = ((Date.now() / 1000 - oldestSeenTs) / 86400).toFixed(1);
+            console.log(`  pagination: page ${page}, ${hashes.length} matching txs, oldest seen ${oldestAge}d ago`);
+        }
+    }
+    return hashes;
 }
 
 function readHashesFromFile(): string[] {
@@ -186,10 +210,15 @@ async function main() {
     // is shown alongside as a separate use-case projection.
     const samples = samplesMultiBlob;
 
-    const hashes = existsSync(HASHES_FILE) && process.env.TX_HASHES_FILE
-        ? readHashesFromFile()
-        : await fetchHashesFromBlockscout(SAMPLE_LIMIT);
-    console.log(`Processing ${hashes.length} tx${hashes.length === 1 ? "" : "es"} for ${CONTRACT_ADDRESS}...`);
+    let hashes: string[];
+    if (existsSync(HASHES_FILE) && process.env.TX_HASHES_FILE) {
+        hashes = readHashesFromFile();
+        console.log(`Loaded ${hashes.length} tx hashes from ${HASHES_FILE}`);
+    } else {
+        console.log(`Fetching KZG-DA tx hashes for ${CONTRACT_ADDRESS} (window=${WINDOW_DAYS}d, max=${MAX_SAMPLE})...`);
+        hashes = await fetchHashesFromBlockscout(WINDOW_DAYS, MAX_SAMPLE);
+        console.log(`  found ${hashes.length} matching tx hashes`);
+    }
 
     type Row = {
         hash: string;
@@ -204,11 +233,25 @@ async function main() {
     };
 
     const rows: Row[] = [];
-    for (const h of hashes) {
-        try {
-            const tx = await fetchTx(h);
+    let failures = 0;
+    let skipped = 0;
+    console.log(`Fetching tx details via RPC (concurrency=${RPC_CONCURRENCY})...`);
+    const startedAt = Date.now();
+
+    // Concurrent fetches in chunks. Public RPCs throttle aggressive parallelism;
+    // 10 in flight is a safe default for publicnode.
+    for (let i = 0; i < hashes.length; i += RPC_CONCURRENCY) {
+        const batch = hashes.slice(i, i + RPC_CONCURRENCY);
+        const settled = await Promise.allSettled(batch.map((h) => fetchTx(h).then((tx) => ({ h, tx }))));
+
+        for (const r of settled) {
+            if (r.status === "rejected") {
+                failures++;
+                continue;
+            }
+            const { h, tx } = r.value;
             if (tx.nBlobs === 0) {
-                console.log(`  skip ${h.slice(0, 10)}… (no blobs)`);
+                skipped++;
                 continue;
             }
             const referenceLoopGas = interp(samples, tx.nBlobs, "gasLoop");
@@ -228,11 +271,12 @@ async function main() {
                 savedGas,
                 savedEth,
             });
-            console.log(
-                `  ${h.slice(0, 10)}…  block=${tx.blockNumber}  N=${tx.nBlobs}  saved=${savedGas.toLocaleString()} gas / ${savedEth.toFixed(6)} ETH`,
-            );
-        } catch (e) {
-            console.warn(`  fail ${h.slice(0, 10)}…  ${(e as Error).message}`);
+        }
+
+        const done = Math.min(i + RPC_CONCURRENCY, hashes.length);
+        if (done % 100 === 0 || done === hashes.length) {
+            const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+            console.log(`  ${done}/${hashes.length}  (${rows.length} ok, ${failures} fail, ${skipped} non-blob, ${elapsed}s)`);
         }
     }
 
