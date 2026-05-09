@@ -46,7 +46,7 @@ contract BlobVerifierHarness {
     }
 
     function blobCount() external view returns (uint256) {
-        return BlobVerifier.blobCount();
+        return BlobVerifier.getBlobCount();
     }
 
     /// @dev Expose constants for test assertions

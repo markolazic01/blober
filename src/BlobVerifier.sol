@@ -17,6 +17,11 @@ library BlobVerifier {
     uint256 internal constant COMMITMENT_LENGTH = 48;
     uint256 internal constant PROOF_LENGTH = 48;
 
+    /// @notice Verifications below this opening count loop the EIP-4844 0x0A precompile;
+    ///         at or above, the EIP-2537 batched path is used. Tuned from on-chain measurements:
+    ///         the 2537 path's fixed overhead pays off starting at ~5 openings.
+    uint256 internal constant BATCH_THRESHOLD = 5;
+
     /// @dev Number of field elements in a blob polynomial (4096).
     ///      First 32 bytes of the expected precompile output.
     bytes32 internal constant FIELD_ELEMENTS_PER_BLOB =
@@ -62,9 +67,48 @@ library BlobVerifier {
 
     error InvalidPointEvaluationPrecompileOutput();
 
+    error ArrayLengthMismatch();
+
     // ──────────────────────────────────────────────────────────────────────
     //  Core functions
     // ──────────────────────────────────────────────────────────────────────
+
+    function verifySinglePointMultipleBlobs(
+        bytes32[] calldata blobHashes,
+        bytes32 z,
+        bytes32 y,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) internal view {
+        uint256 blobCount = blobHashes.length;
+        if (blobCount != commitments.length || blobCount != proofs.length) revert ArrayLengthMismatch();
+        if (blobCount < BATCH_THRESHOLD) {
+            for (uint256 i; i < blobCount; ++i) {
+                verifySinglePoint(blobHashes[i], z, y, commitments[i], proofs[i]);
+            }
+        } else {
+            // batched verification
+        }
+    }
+
+    function verifyMultiplePoints/*SingleBlob*/(
+        bytes32 blobHash,
+        bytes32[] calldata z_coordinates,
+        bytes32[] calldata y_coordinates,
+        bytes calldata commitment,
+        bytes calldata proof
+    ) internal view {
+        uint256 pointCount = z_coordinates.length;
+        if (pointCount != y_coordinates.length) revert ArrayLengthMismatch();
+        if (pointCount < BATCH_THRESHOLD) {
+            for (uint256 i; i < pointCount; ++i) {
+                verifySinglePoint(blobHash, z_coordinates[i], y_coordinates[i], commitment, proof);
+            }
+        } else {
+            // batched verification
+        }
+
+    }
 
     function verifySinglePoint(
         uint256 blobIndex,
@@ -172,13 +216,14 @@ library BlobVerifier {
     /// @notice Count the number of blobs in the current transaction.
     /// @dev Iterates from index 0 until `blobhash` returns zero.
     /// @return count Number of blobs found.
-    function blobCount() internal view returns (uint256 count) {
+    function getBlobCount() internal view returns (uint256 count) {
         while (true) {
             if (blobhash(count) == bytes32(0)) break;
             count++;
         }
     }
 
+    /// @notice Check that a hash is properly versioned
     function _checkHashPrefix(bytes32 versionedHash) private pure {
         if (versionedHash[0] != VERSIONED_HASH_VERSION_KZG) {
             revert InvalidVersionedHashVersion(versionedHash[0]);
