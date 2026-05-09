@@ -76,7 +76,7 @@ library BlobVerifier {
     function verifySinglePointMultipleBlobs(
         bytes32[] calldata blobHashes,
         bytes32 z,
-        bytes32 y,
+        bytes32[] calldata y_coordinates,
         bytes[] calldata commitments,
         bytes[] calldata proofs
     ) internal view {
@@ -84,7 +84,7 @@ library BlobVerifier {
         if (blobCount != commitments.length || blobCount != proofs.length) revert ArrayLengthMismatch();
         if (blobCount < BATCH_THRESHOLD) {
             for (uint256 i; i < blobCount; ++i) {
-                verifySinglePoint(blobHashes[i], z, y, commitments[i], proofs[i]);
+                verifySinglePoint(blobHashes[i], z, y_coordinates[i], commitments[i], proofs[i]);
             }
         } else {
             // batched verification
