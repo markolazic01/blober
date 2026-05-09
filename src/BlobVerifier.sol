@@ -21,8 +21,8 @@ library BlobVerifier {
 
     /// @notice Verifications below this opening count loop the EIP-4844 0x0A precompile;
     ///         at or above, the EIP-2537 batched path is used. Tuned from on-chain measurements:
-    ///         the 2537 path's fixed overhead pays off starting at ~5 openings.
-    uint256 internal constant BATCH_THRESHOLD = 5;
+    ///         the 2537 path's fixed overhead pays off starting at ~4 openings.
+    uint256 internal constant BATCH_THRESHOLD = 4;
 
     /// @dev Number of field elements in a blob polynomial (4096).
     ///      First 32 bytes of the expected precompile output.
@@ -147,7 +147,9 @@ library BlobVerifier {
         bytes32[] calldata ys,
         bytes[] calldata commitments,
         bytes[] calldata proofs
-    ) private view { }
+    ) private view {
+        
+    }
 
     function _verifySinglePoint(
         bytes32 versionedHash,
