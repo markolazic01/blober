@@ -9,7 +9,7 @@ Blober's special feature is in multi-point verifications, across multiple blobs,
 
 Blober also contains other utils that can help you checksum the specific blob hash, get a versioned hash from the blob data hash, check if blob is present in the tx and more! 
 
-With introduction of 14 blob per block limit, Blober multi-point verification becomes increasingly effective, for L2s using Blober instead of iterative point validation, gas consumption can be reduced by up to **80%**!
+With introduction of 21 blob per block limit, Blober multi-point verification becomes increasingly effective, for L2s using Blober instead of iterative point validation, gas consumption can be reduced by up to **80%**!
 
 Danksharding and Block-in-Blob EIPs can further leverage usage of Blober, potentially requiring the development of new features.
 
