@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import { Bls12381 } from "./Bls12381.sol";
+import {Bls12381} from "./Bls12381.sol";
 
 library BlobVerifier {
-
     // ──────────────────────────────────────────────────────────────────────
     //  Constants
     // ──────────────────────────────────────────────────────────────────────
@@ -21,8 +20,7 @@ library BlobVerifier {
 
     /// @dev Number of field elements in a blob polynomial (4096).
     ///      First 32 bytes of the expected precompile output.
-    bytes32 internal constant FIELD_ELEMENTS_PER_BLOB =
-        bytes32(uint256(4096));
+    bytes32 internal constant FIELD_ELEMENTS_PER_BLOB = bytes32(uint256(4096));
 
     /// @dev BLS12-381 scalar field modulus.
     ///      Second 32 bytes of the expected precompile output.
@@ -91,8 +89,31 @@ library BlobVerifier {
     error PairingCheckFailed();
 
     // ──────────────────────────────────────────────────────────────────────
-    //  Core functions
+    //  Core verifiers — 48-byte (compressed)
+    //  EIP-4844 wire format. Each call hits the point-evaluation precompile (0x0A).
     // ──────────────────────────────────────────────────────────────────────
+
+    function verifySinglePoint(uint256 blobIndex, bytes32 z, bytes32 y, bytes calldata commitment, bytes calldata proof)
+        internal
+        view
+    {
+        // Retrieve the versioned hash via BLOBHASH opcode
+        bytes32 versionedHash = getBlobHash(blobIndex);
+        _verifySinglePoint(versionedHash, z, y, commitment, proof);
+    }
+
+    function verifySinglePoint(
+        bytes32 versionedHash,
+        bytes32 z,
+        bytes32 y,
+        bytes calldata commitment,
+        bytes calldata proof
+    ) internal view {
+        // Check provided hash prefix
+        _checkHashPrefix(versionedHash);
+        // Retrieve the versioned hash via BLOBHASH opcode
+        _verifySinglePoint(versionedHash, z, y, commitment, proof);
+    }
 
     /// @notice Verify multiple blobs at a single (z, y_i) opening, 48-byte (compressed) form.
     /// @dev    Loops the EIP-4844 point-evaluation precompile per blob; compressed inputs
@@ -112,21 +133,28 @@ library BlobVerifier {
     }
 
     /// @notice Verify multiple openings of a single blob at the 48-byte (compressed) form.
-    /// @dev    Loops the EIP-4844 point-evaluation precompile per (z, y); compressed inputs
-    ///         can't use EIP-2537 batching, so any batched path lives in the `*128` variant.
+    /// @dev    Loops the EIP-4844 point-evaluation precompile per (z_i, y_i, π_i); compressed
+    ///         inputs can't use EIP-2537 batching, so any batched path lives in the `*128` variant.
+    ///         Each opening has its own proof — there is no shared-proof KZG verification scheme
+    ///         for distinct evaluation points.
     function verifyMultiplePoints(
         bytes32 blobHash,
         bytes32[] calldata z_coordinates,
         bytes32[] calldata y_coordinates,
         bytes calldata commitment,
-        bytes calldata proof
+        bytes[] calldata proofs
     ) internal view {
         uint256 pointCount = z_coordinates.length;
-        if (pointCount != y_coordinates.length) revert ArrayLengthMismatch();
+        if (pointCount != y_coordinates.length || pointCount != proofs.length) revert ArrayLengthMismatch();
         for (uint256 i; i < pointCount; ++i) {
-            verifySinglePoint(blobHash, z_coordinates[i], y_coordinates[i], commitment, proof);
+            verifySinglePoint(blobHash, z_coordinates[i], y_coordinates[i], commitment, proofs[i]);
         }
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  Core verifiers — 128-byte (uncompressed, EIP-2537 batched)
+    //  One amortized pairing check via G1_MSM (0x0C) + PAIRING_CHECK (0x0F).
+    // ──────────────────────────────────────────────────────────────────────
 
     /// @notice Verify multiple openings of a single blob using EIP-2537 batched pairing.
     /// @dev    All G1 points (commitment, proofs) are 128-byte EIP-2537 uncompressed encoding.
@@ -211,65 +239,99 @@ library BlobVerifier {
             mstore(add(gDst, 128), g1GenScalar)
         }
 
-        // 5. Two MSMs and one pairing check.
-        bytes memory lhs = Bls12381.g1MsmRaw(lhsInput);
-        bytes memory rhs = Bls12381.g1MsmRaw(rhsInput);
-
-        bytes[] memory g1Pts = new bytes[](2);
-        bytes[] memory g2Pts = new bytes[](2);
-        g1Pts[0] = lhs;
-        g1Pts[1] = rhs;
-        g2Pts[0] = NEG_G2_GENERATOR;
-        g2Pts[1] = KZG_S_G2_MAINNET;
-
-        if (!Bls12381.pairingCheck(g1Pts, g2Pts)) revert PairingCheckFailed();
+        // 5. Two MSMs, then the shared pairing tail.
+        _pairingCheckOrRevert(Bls12381.g1MsmRaw(lhsInput), Bls12381.g1MsmRaw(rhsInput));
     }
 
-    /// @dev Fiat-Shamir transcript hash binding all prover-supplied inputs.
-    function _challengeSeed128(
-        bytes32 blobHash,
-        bytes32[] calldata zs,
-        bytes32[] calldata ys,
-        bytes calldata commitment,
+    /// @notice Verify a shared opening point z across multiple blobs using EIP-2537 batched pairing.
+    /// @dev    All G1 points (commitments, proofs) are 128-byte EIP-2537 uncompressed encoding.
+    ///         Each blob i has its own commitment C_i, proof π_i, and opened value y_i, but
+    ///         every blob is opened at the same point z.
+    ///
+    ///         Verification equation, batched with Fiat-Shamir weights r_i:
+    ///           e(LHS, -G2_gen) · e(RHS, [s]G2) == 1
+    ///         where
+    ///           LHS = Σ r_i·C_i + Σ (r_i·z)·π_i - (Σ r_i·y_i)·G1_gen
+    ///           RHS = Σ r_i·π_i
+    function verifySinglePointMultipleBlobs128(
+        bytes32[] calldata blobHashes,
+        bytes32 z,
+        bytes32[] calldata y_coordinates,
+        bytes[] calldata commitments,
         bytes[] calldata proofs
-    ) private pure returns (bytes32) {
-        return keccak256(abi.encode(
-            "BlobVerifier.verifyMultiplePoints128", // domain separator
-            blobHash, zs, ys, commitment, proofs
-        ));
-    }
-
-    /// @dev Per-index challenge scalar in [1, p). Clamps the (astronomically rare)
-    ///      zero case to 1 so the random combination stays non-degenerate.
-    function _challengeScalar(bytes32 seed, uint256 i, uint256 modulus) private pure returns (uint256 r) {
-        r = uint256(keccak256(abi.encode(seed, i))) % modulus;
-        if (r == 0) r = 1;
-    }
-
-    function verifySinglePoint(
-        uint256 blobIndex,
-        bytes32 z,
-        bytes32 y,
-        bytes calldata commitment,
-        bytes calldata proof
     ) internal view {
-        // Retrieve the versioned hash via BLOBHASH opcode
-        bytes32 versionedHash = getBlobHash(blobIndex);
-        _verifySinglePoint(versionedHash, z, y, commitment, proof);
+        uint256 n = blobHashes.length;
+        if (n == 0) revert ArrayLengthMismatch();
+        if (n != y_coordinates.length || n != commitments.length || n != proofs.length) {
+            revert ArrayLengthMismatch();
+        }
+
+        // 1. Validate scalar in range; per-y check happens in the main loop.
+        uint256 modulus = uint256(BLS_MODULUS);
+        if (uint256(z) >= modulus) revert InvalidScalar(z);
+
+        // 2. Bind each commitment to its claimed blobHash (also enforces 128-byte length via compress).
+        for (uint256 i; i < n; ++i) {
+            bytes32 derived = commitmentToVersionedHash(Bls12381.compress(commitments[i]));
+            if (derived != blobHashes[i]) revert CommitmentMismatch(blobHashes[i], derived);
+        }
+
+        // 3. Build LHS and RHS MSM input buffers in one pass.
+        //    LHS layout: [(C_i, r_i)         for i in 0..n]      (slots 0..n)
+        //             || [(π_i, r_i·z)       for i in 0..n]      (slots n..2n)
+        //             || (G1_gen, -Σr_i·y_i)                     (slot 2n)
+        //    RHS layout: [(π_i, r_i)         for i in 0..n]
+        bytes memory lhsInput = new bytes((2 * n + 1) * 160);
+        bytes memory rhsInput = new bytes(n * 160);
+
+        bytes32 seed = _challengeSeed128(blobHashes, z, y_coordinates, commitments, proofs);
+        uint256 zU = uint256(z);
+        uint256 ySum;
+
+        for (uint256 i; i < n; ++i) {
+            if (uint256(y_coordinates[i]) >= modulus) revert InvalidScalar(y_coordinates[i]);
+
+            uint256 r = _challengeScalar(seed, i, modulus);
+            ySum = addmod(ySum, mulmod(r, uint256(y_coordinates[i]), modulus), modulus);
+
+            bytes32 rScalar = bytes32(r);
+            bytes32 rzScalar = bytes32(mulmod(r, zU, modulus));
+            bytes calldata commitment = commitments[i];
+            bytes calldata proof = proofs[i];
+            if (proof.length != 128) revert InvalidProofLength(proof.length);
+
+            // LHS commitment slot at i, LHS proof slot at n+i, RHS proof slot at i.
+            assembly ("memory-safe") {
+                let lcDst := add(add(lhsInput, 0x20), mul(i, 160))
+                calldatacopy(lcDst, commitment.offset, 128)
+                mstore(add(lcDst, 128), rScalar)
+
+                let lpDst := add(add(lhsInput, 0x20), mul(add(n, i), 160))
+                calldatacopy(lpDst, proof.offset, 128)
+                mstore(add(lpDst, 128), rzScalar)
+
+                let rDst := add(add(rhsInput, 0x20), mul(i, 160))
+                calldatacopy(rDst, proof.offset, 128)
+                mstore(add(rDst, 128), rScalar)
+            }
+        }
+
+        // 4. Append (G1_gen, -Σr_i·y_i) at slot 2n in the LHS buffer.
+        bytes memory g1Gen = G1_GENERATOR;
+        bytes32 g1GenScalar = bytes32(ySum == 0 ? 0 : modulus - ySum);
+        assembly ("memory-safe") {
+            let gDst := add(add(lhsInput, 0x20), mul(mul(2, n), 160))
+            mcopy(gDst, add(g1Gen, 0x20), 128)
+            mstore(add(gDst, 128), g1GenScalar)
+        }
+
+        // 5. Two MSMs, then the shared pairing tail.
+        _pairingCheckOrRevert(Bls12381.g1MsmRaw(lhsInput), Bls12381.g1MsmRaw(rhsInput));
     }
 
-    function verifySinglePoint(
-        bytes32 versionedHash,
-        bytes32 z,
-        bytes32 y,
-        bytes calldata commitment,
-        bytes calldata proof
-    ) internal view {
-        // Check provided hash prefix
-        _checkHashPrefix(versionedHash);
-        // Retrieve the versioned hash via BLOBHASH opcode
-        _verifySinglePoint(versionedHash, z, y, commitment, proof);
-    }
+    // ──────────────────────────────────────────────────────────────────────
+    //  Internals
+    // ──────────────────────────────────────────────────────────────────────
 
     function _verifySinglePoint(
         bytes32 versionedHash,
@@ -286,12 +348,55 @@ library BlobVerifier {
             revert InvalidProofLength(proof.length);
         }
 
-        (bool ok, bytes memory output) = POINT_EVALUATION_PRECOMPILE
-            .staticcall(abi.encodePacked(versionedHash, z, y, commitment, proof));
+        (bool ok, bytes memory output) =
+            POINT_EVALUATION_PRECOMPILE.staticcall(abi.encodePacked(versionedHash, z, y, commitment, proof));
 
         if (!ok) revert PointEvaluationPrecompileCallFailed();
         // Checks for both blob number of fields and the bls modulus
         if (keccak256(output) != POINT_EVALUATION_PRECOMPILE_OUTPUT) revert InvalidPointEvaluationPrecompileOutput();
+    }
+
+    /// @dev Final pairing step shared by the *128 batched verifiers:
+    ///      e(lhs, -G2_gen) · e(rhs, [s]G2) == 1.
+    function _pairingCheckOrRevert(bytes memory lhs, bytes memory rhs) private view {
+        bytes[] memory g1Pts = new bytes[](2);
+        bytes[] memory g2Pts = new bytes[](2);
+        g1Pts[0] = lhs;
+        g1Pts[1] = rhs;
+        g2Pts[0] = NEG_G2_GENERATOR;
+        g2Pts[1] = KZG_S_G2_MAINNET;
+        if (!Bls12381.pairingCheck(g1Pts, g2Pts)) revert PairingCheckFailed();
+    }
+
+    /// @dev Fiat-Shamir transcript for verifyMultiplePoints128 (one blob, many openings).
+    function _challengeSeed128(
+        bytes32 blobHash,
+        bytes32[] calldata zs,
+        bytes32[] calldata ys,
+        bytes calldata commitment,
+        bytes[] calldata proofs
+    ) private pure returns (bytes32) {
+        return keccak256(abi.encode("BlobVerifier.verifyMultiplePoints128", blobHash, zs, ys, commitment, proofs));
+    }
+
+    /// @dev Fiat-Shamir transcript for verifySinglePointMultipleBlobs128 (many blobs, shared z).
+    function _challengeSeed128(
+        bytes32[] calldata blobHashes,
+        bytes32 z,
+        bytes32[] calldata ys,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) private pure returns (bytes32) {
+        return keccak256(
+            abi.encode("BlobVerifier.verifySinglePointMultipleBlobs128", blobHashes, z, ys, commitments, proofs)
+        );
+    }
+
+    /// @dev Per-index challenge scalar in [1, p). Clamps the (astronomically rare)
+    ///      zero case to 1 so the random combination stays non-degenerate.
+    function _challengeScalar(bytes32 seed, uint256 i, uint256 modulus) private pure returns (uint256 r) {
+        r = uint256(keccak256(abi.encode(seed, i))) % modulus;
+        if (r == 0) r = 1;
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -313,9 +418,7 @@ library BlobVerifier {
     /// @dev Matches the EIP-4844 spec: version_byte || sha256(commitment)[1:].
     ///      Accepts `bytes memory` so callers holding a freshly-built buffer
     ///      (e.g., the output of `Bls12381.compress`) can pass it directly.
-    function commitmentToVersionedHash(
-        bytes memory commitment
-    ) internal pure returns (bytes32 versionedHash) {
+    function commitmentToVersionedHash(bytes memory commitment) internal pure returns (bytes32 versionedHash) {
         if (commitment.length != COMMITMENT_LENGTH) {
             revert InvalidCommitmentLength(commitment.length);
         }
