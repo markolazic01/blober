@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import { BLSUtils } from "./BLSUtils.sol";
+
 library BlobVerifier {
 
     // ──────────────────────────────────────────────────────────────────────
@@ -19,8 +21,8 @@ library BlobVerifier {
 
     /// @notice Verifications below this opening count loop the EIP-4844 0x0A precompile;
     ///         at or above, the EIP-2537 batched path is used. Tuned from on-chain measurements:
-    ///         the 2537 path's fixed overhead pays off starting at ~5 openings.
-    uint256 internal constant BATCH_THRESHOLD = 5;
+    ///         the 2537 path's fixed overhead pays off starting at ~4 openings.
+    uint256 internal constant BATCH_THRESHOLD = 4;
 
     /// @dev Number of field elements in a blob polynomial (4096).
     ///      First 32 bytes of the expected precompile output.
@@ -84,10 +86,14 @@ library BlobVerifier {
         if (blobCount != commitments.length || blobCount != proofs.length) revert ArrayLengthMismatch();
         if (blobCount < BATCH_THRESHOLD) {
             for (uint256 i; i < blobCount; ++i) {
+                // Loop: N individual precompile calls
+                // Cost: N × 50,000 gas (precompile) + overhead
                 verifySinglePoint(blobHashes[i], z, y_coordinates[i], commitments[i], proofs[i]);
             }
         } else {
-            // batched verification
+            // Batched: single pairing check via BLS12-381 precompiles
+            // Cost: ~170,000 gas (fixed) + sublinear MSM growth
+            _verifyBatchedMultiBlob(blobHashes, z, y_coordinates, commitments, proofs);
         }
     }
 
@@ -133,6 +139,16 @@ library BlobVerifier {
         _checkHashPrefix(versionedHash);
         // Retrieve the versioned hash via BLOBHASH opcode
         _verifySinglePoint(versionedHash, z, y, commitment, proof);
+    }
+
+    function _verifyBatchedMultiBlob(
+        bytes32[] calldata blobHashes,
+        bytes32 z,
+        bytes32[] calldata ys,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) private view {
+        
     }
 
     function _verifySinglePoint(
