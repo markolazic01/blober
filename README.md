@@ -1,4 +1,4 @@
-## Blober - On-chain Blob Verification Library in Solidity ![Tests](https://github.com/markolazic01/blob-verifier/workflows/CI/badge.svg)
+## Blober - On-chain Blob Verification Library in Solidity ![Tests](https://github.com/markolazic01/blober/workflows/CI/badge.svg)
 **Blober** is a Solidity library for Ethereum blob verification (and more), by introducing a well designed set of blob point verification flows it eases helps the L2 settlements. 
 
 ---
