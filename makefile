@@ -1,4 +1,4 @@
-.PHONY: build test build-all test-all benchmark
+.PHONY build test build-full test-full build-benchmark test-benchmark
 
 build:
 	forge build --sizes
