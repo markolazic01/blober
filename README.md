@@ -47,6 +47,8 @@ MIT
 ---
 ## Benchmarking results
 
+Done on commit: d6c03fd0a01cdcf6f6a7f102ecc94a729c0c94d7
+
 Side-by-side measurement of `BlobVerifier`'s EIP-2537 batched KZG verifiers vs the industry-standard EIP-4844 0x0A-loop pattern, plus a real-mainnet replay grounding the comparison in production traffic.
 
 ## Headline

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.35;
 
 /// @title Bls12381
 /// @notice Thin wrappers around the EIP-2537 BLS12-381 precompiles used for
