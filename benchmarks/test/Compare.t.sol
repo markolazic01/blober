@@ -2,7 +2,7 @@
 pragma solidity ^0.8.35;
 
 import {Test, console2} from "forge-std/Test.sol";
-import {BlobVerifier} from "blob-verifier/BlobVerifier.sol";
+import {BlobVerifier} from "../../src/BlobVerifier.sol";
 import {LoopVerifier} from "../src/LoopVerifier.sol";
 
 /// @dev Tiny harness exposing the batched verifiers as external view functions,
@@ -164,7 +164,7 @@ contract Compare is Test {
 
     function _appendRow(string memory csv, uint256 n, uint256 gasLoop, uint256 gasBatched)
         internal
-        view
+        pure
         returns (string memory)
     {
         uint256 ratio = gasLoop == 0 ? 0 : (gasBatched * 100) / gasLoop;
