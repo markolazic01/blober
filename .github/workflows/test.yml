@@ -36,3 +36,8 @@ jobs:
         run: |
           forge test -vvv
         id: test
+
+      - name: Run benchmark build
+        run: |
+          cd benchmarks/ && forge build
+        id: benchmark-build
