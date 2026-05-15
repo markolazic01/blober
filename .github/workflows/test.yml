@@ -29,15 +29,20 @@ jobs:
 
       - name: Run Forge build
         run: |
-          forge build --sizes
+          make build
         id: build
 
       - name: Run Forge tests
         run: |
-          forge test -vvv
+          make test
         id: test
 
-      - name: Run benchmark build
+      - name: Run build benchmark
         run: |
-          cd benchmarks/ && forge build
-        id: benchmark-build
+          make build-benchmark
+        id: build-benchmark
+
+      - name: Run test benchmark
+        run: |
+          make test-benchmark
+        id: test-benchmark
