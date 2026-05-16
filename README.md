@@ -29,13 +29,13 @@ $ forge test --fork-url <ETH_RPC>
 
 #### Install
 ```
-$ forge install markolazic01/blob-verifier
+$ forge install markolazic01/blober
 ```
 #### Import
 ``` solidity
 pragma solidity ^0.8.30;
 
-import { BlobVerifier } from "blob-verifier/BlobVerifier.sol";
+import { BlobVerifier } from "blober/BlobVerifier.sol";
 ```
 
 ---
