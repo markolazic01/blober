@@ -422,7 +422,9 @@ contract BlobVerifierTest is Test {
 
         // Build a shorter y array (one less element than z) to trigger the length check.
         bytes32[] memory shortY = new bytes32[](multiPointOneBlob.y.length - 1);
-        for (uint256 i; i < shortY.length; ++i) shortY[i] = multiPointOneBlob.y[i];
+        for (uint256 i; i < shortY.length; ++i) {
+            shortY[i] = multiPointOneBlob.y[i];
+        }
 
         vm.expectRevert(BlobVerifier.ArrayLengthMismatch.selector);
         harness.verifyMultiplePoints128(
@@ -518,7 +520,9 @@ contract BlobVerifierTest is Test {
 
         // Shorten commitments by one to break the n != commitments.length check.
         bytes[] memory shortCommitments = new bytes[](f.commitments.length - 1);
-        for (uint256 i; i < shortCommitments.length; ++i) shortCommitments[i] = f.commitments[i];
+        for (uint256 i; i < shortCommitments.length; ++i) {
+            shortCommitments[i] = f.commitments[i];
+        }
 
         vm.expectRevert(BlobVerifier.ArrayLengthMismatch.selector);
         harness.verifySinglePointMultipleBlobs128(blobHashes, f.z, f.y, shortCommitments, f.proofs);

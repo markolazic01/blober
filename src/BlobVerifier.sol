@@ -384,7 +384,9 @@ library BlobVerifier {
         bytes calldata commitment,
         bytes calldata proof
     ) private view {
-        if (commitment.length != COMMITMENT_LENGTH) revert InvalidCommitmentLength(commitment.length);
+        if (commitment.length != COMMITMENT_LENGTH) {
+            revert InvalidCommitmentLength(commitment.length);
+        }
         if (proof.length != PROOF_LENGTH) revert InvalidProofLength(proof.length);
         _callPointEvaluation(abi.encodePacked(versionedHash, z, y, commitment, proof));
     }
@@ -469,7 +471,7 @@ library BlobVerifier {
         bytes32 digest = sha256(commitment);
         versionedHash = bytes32(
             (uint256(digest) & 0x00ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)
-            | (uint256(uint8(VERSIONED_HASH_VERSION_KZG)) << 248)
+                | (uint256(uint8(VERSIONED_HASH_VERSION_KZG)) << 248)
         );
     }
 
