@@ -72,7 +72,7 @@ contract BlobVerifierHarness {
         return BlobVerifier.FIELD_ELEMENTS_PER_BLOB;
     }
 
-    function BLS_MODULUS() external pure returns (bytes32) {
+    function BLS_MODULUS() external pure returns (uint256) {
         return BlobVerifier.BLS_MODULUS;
     }
 

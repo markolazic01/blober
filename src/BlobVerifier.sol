@@ -24,8 +24,8 @@ library BlobVerifier {
 
     /// @dev BLS12-381 scalar field modulus.
     ///      Second 32 bytes of the expected precompile output.
-    bytes32 internal constant BLS_MODULUS =
-        bytes32(uint256(52435875175126190479447740508185965837690552500527637822603658699938581184513));
+    uint256 internal constant BLS_MODULUS =
+        52435875175126190479447740508185965837690552500527637822603658699938581184513;
 
     // @dev The precompile expected output on success:
     // keccak(FIELD_ELEMENTS_PER_BLOB + BLS_MODULUS)
@@ -183,16 +183,14 @@ library BlobVerifier {
         if (n == 0) revert ArrayLengthMismatch();
         if (n != y_coordinates.length || n != proofs.length) revert ArrayLengthMismatch();
 
-        uint256 modulus = uint256(BLS_MODULUS);
-
         // Threshold fallback: at small n, looping 0x0A on compressed inputs is
         // cheaper than the EIP-2537 batched pairing. Compress the (single) commitment
         // once and the proofs per iteration; 0x0A validates each opening individually.
         if (n < BATCH_THRESHOLD_128) {
             bytes memory cComp = Bls12381.compress(commitment);
             for (uint256 i; i < n; ++i) {
-                if (uint256(z_coordinates[i]) >= modulus) revert InvalidScalar(z_coordinates[i]);
-                if (uint256(y_coordinates[i]) >= modulus) revert InvalidScalar(y_coordinates[i]);
+                if (uint256(z_coordinates[i]) >= BLS_MODULUS) revert InvalidScalar(z_coordinates[i]);
+                if (uint256(y_coordinates[i]) >= BLS_MODULUS) revert InvalidScalar(y_coordinates[i]);
                 bytes calldata proof = proofs[i];
                 if (proof.length != 128) revert InvalidProofLength(proof.length);
 
@@ -213,8 +211,8 @@ library BlobVerifier {
         // 2. Validate scalars in range. The precompile would catch this too, but
         //    catching here gives a precise error and avoids unnecessary MSM work.
         for (uint256 i; i < n; ++i) {
-            if (uint256(z_coordinates[i]) >= modulus) revert InvalidScalar(z_coordinates[i]);
-            if (uint256(y_coordinates[i]) >= modulus) revert InvalidScalar(y_coordinates[i]);
+            if (uint256(z_coordinates[i]) >= BLS_MODULUS) revert InvalidScalar(z_coordinates[i]);
+            if (uint256(y_coordinates[i]) >= BLS_MODULUS) revert InvalidScalar(y_coordinates[i]);
         }
 
         // 3. Build LHS and RHS MSM input buffers in one pass.
@@ -229,11 +227,11 @@ library BlobVerifier {
         uint256 rSum;
         uint256 ySum;
         for (uint256 i; i < n; ++i) {
-            uint256 r = _challengeScalar(seed, i, modulus);
-            rSum = addmod(rSum, r, modulus);
-            ySum = addmod(ySum, mulmod(r, uint256(y_coordinates[i]), modulus), modulus);
+            uint256 r = _challengeScalar(seed, i, BLS_MODULUS);
+            rSum = addmod(rSum, r, BLS_MODULUS);
+            ySum = addmod(ySum, mulmod(r, uint256(y_coordinates[i]), BLS_MODULUS), BLS_MODULUS);
 
-            bytes32 lScalar = bytes32(mulmod(r, uint256(z_coordinates[i]), modulus));
+            bytes32 lScalar = bytes32(mulmod(r, uint256(z_coordinates[i]), BLS_MODULUS));
             bytes32 rScalar = bytes32(r);
             bytes calldata proof = proofs[i];
             if (proof.length != 128) revert InvalidProofLength(proof.length);
@@ -253,7 +251,7 @@ library BlobVerifier {
         // 4. Append (C, Σr_i) and (G1_gen, -Σr_i·y_i) at the end of the LHS buffer.
         bytes memory g1Gen = G1_GENERATOR;
         bytes32 commitmentScalar = bytes32(rSum);
-        bytes32 g1GenScalar = bytes32(ySum == 0 ? 0 : modulus - ySum); // -ySum mod p
+        bytes32 g1GenScalar = bytes32(ySum == 0 ? 0 : BLS_MODULUS - ySum); // -ySum mod p
         assembly ("memory-safe") {
             let cDst := add(add(lhsInput, 0x20), mul(n, 160))
             calldatacopy(cDst, commitment.offset, 128)
