@@ -20,7 +20,7 @@ library BlobVerifier {
 
     /// @dev Number of field elements in a blob polynomial (4096).
     ///      First 32 bytes of the expected precompile output.
-    bytes32 internal constant FIELD_ELEMENTS_PER_BLOB = bytes32(uint256(4096));
+    // bytes32 internal constant FIELD_ELEMENTS_PER_BLOB = bytes32(uint256(4096));
 
     /// @dev BLS12-381 scalar field modulus.
     ///      Second 32 bytes of the expected precompile output.
