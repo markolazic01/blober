@@ -6,6 +6,7 @@ libs = ["lib"]
 evm_version = "osaka"
 via_ir = true
 optimizer = true
+optimizer_runs = 99999
 fs_permissions = [{ access = "read", path = "./test/fixtures" }]
 
 [profile.benchmark]
