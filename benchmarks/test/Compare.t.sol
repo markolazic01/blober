@@ -62,7 +62,7 @@ contract Compare is Test {
         batchedVerifier = new BatchedVerifier();
 
         // Multi-blob fixture
-        string memory mb = vm.readFile("data/fixtures_multi_blob.json");
+        string memory mb = vm.readFile("benchmarks/data/fixtures_multi_blob.json");
         mbZ = vm.parseJsonBytes32(mb, ".z");
         mbBlobHashes = vm.parseJsonBytes32Array(mb, ".blobHashes");
         mbCommitmentsCompressed = vm.parseJsonBytesArray(mb, ".commitmentsCompressed");
@@ -72,7 +72,7 @@ contract Compare is Test {
         mbProofsUncompressed = vm.parseJsonBytesArray(mb, ".proofsUncompressed");
 
         // Multi-point fixture
-        string memory mp = vm.readFile("data/fixtures_multi_point.json");
+        string memory mp = vm.readFile("benchmarks/data/fixtures_multi_point.json");
         mpBlobHash = vm.parseJsonBytes32(mp, ".blobHash");
         mpCommitmentCompressed = vm.parseJsonBytes(mp, ".commitmentCompressed");
         mpCommitmentUncompressed = vm.parseJsonBytes(mp, ".commitmentUncompressed");
@@ -96,7 +96,7 @@ contract Compare is Test {
             csv = _appendRow(csv, SWEEP[i], gasLoop, gasBatched);
         }
 
-        vm.writeFile("data/synthetic_gas_multi_blob_one_point.csv", csv);
+        vm.writeFile("benchmarks/data/synthetic_gas_multi_blob_one_point.csv", csv);
         console2.log("Wrote data/synthetic_gas_multi_blob_one_point.csv");
     }
 
@@ -131,7 +131,7 @@ contract Compare is Test {
             csv = _appendRow(csv, SWEEP[i], gasLoop, gasBatched);
         }
 
-        vm.writeFile("data/synthetic_gas_multi_point_one_blob.csv", csv);
+        vm.writeFile("benchmarks/data/synthetic_gas_multi_point_one_blob.csv", csv);
         console2.log("Wrote data/synthetic_gas_multi_point_one_blob.csv");
     }
 

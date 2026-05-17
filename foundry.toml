@@ -10,4 +10,6 @@ fs_permissions = [{ access = "read", path = "./test/fixtures" }]
 
 [profile.benchmark]
 src = "benchmarks/src"
+test = "benchmarks/test"
+fs_permissions = [{ access = "read-write", path = "benchmarks/data" }]
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
