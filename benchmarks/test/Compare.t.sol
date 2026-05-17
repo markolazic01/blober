@@ -186,11 +186,15 @@ contract Compare is Test {
 
     function _sliceBytes32(bytes32[] storage arr, uint256 n) internal view returns (bytes32[] memory out) {
         out = new bytes32[](n);
-        for (uint256 i; i < n; ++i) out[i] = arr[i];
+        for (uint256 i; i < n; ++i) {
+            out[i] = arr[i];
+        }
     }
 
     function _sliceBytes(bytes[] storage arr, uint256 n) internal view returns (bytes[] memory out) {
         out = new bytes[](n);
-        for (uint256 i; i < n; ++i) out[i] = arr[i];
+        for (uint256 i; i < n; ++i) {
+            out[i] = arr[i];
+        }
     }
 }

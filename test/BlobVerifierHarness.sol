@@ -68,11 +68,11 @@ contract BlobVerifierHarness {
     }
 
     /// @dev Expose constants for test assertions
-    function FIELD_ELEMENTS_PER_BLOB() external pure returns (bytes32) {
-        return BlobVerifier.FIELD_ELEMENTS_PER_BLOB;
-    }
+    // function FIELD_ELEMENTS_PER_BLOB() external pure returns (bytes32) {
+    //     return BlobVerifier.FIELD_ELEMENTS_PER_BLOB;
+    // }
 
-    function BLS_MODULUS() external pure returns (bytes32) {
+    function BLS_MODULUS() external pure returns (uint256) {
         return BlobVerifier.BLS_MODULUS;
     }
 
