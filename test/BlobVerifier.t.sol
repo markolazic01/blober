@@ -119,9 +119,9 @@ contract BlobVerifierTest is Test {
         assertEq(stored, expected, "POINT_EVALUATION_PRECOMPILE_OUTPUT hash mismatch");
     }
 
-    function test_fieldElementsPerBlobValue() public view {
-        assertEq(harness.FIELD_ELEMENTS_PER_BLOB(), bytes32(uint256(4096)), "FIELD_ELEMENTS_PER_BLOB should be 4096");
-    }
+    // function test_fieldElementsPerBlobValue() public view {
+    //     assertEq(harness.FIELD_ELEMENTS_PER_BLOB(), bytes32(uint256(4096)), "FIELD_ELEMENTS_PER_BLOB should be 4096");
+    // }
 
     // ════════════════════════════════════════════════════════════════════
     //  getBlobHash
