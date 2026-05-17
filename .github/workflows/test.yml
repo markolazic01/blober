@@ -41,7 +41,7 @@ jobs:
         run: |
           cd benchmarks/scripts
           npm install
-          npm generate
+          npm run generate
           cd ../../
           make build-benchmark
         id: build-benchmark
