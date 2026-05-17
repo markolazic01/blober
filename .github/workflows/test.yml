@@ -39,6 +39,10 @@ jobs:
 
       - name: Run build benchmark
         run: |
+          cd benchmarks/scripts
+          npm install
+          npm generate
+          cd ../../
           make build-benchmark
         id: build-benchmark
 
