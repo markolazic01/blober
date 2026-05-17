@@ -208,14 +208,7 @@ library BlobVerifier {
             if (derived != blobHash) revert CommitmentMismatch(blobHash, derived);
         }
 
-        // 2. Validate scalars in range. The precompile would catch this too, but
-        //    catching here gives a precise error and avoids unnecessary MSM work.
-        for (uint256 i; i < n; ++i) {
-            if (uint256(z_coordinates[i]) >= BLS_MODULUS) revert InvalidScalar(z_coordinates[i]);
-            if (uint256(y_coordinates[i]) >= BLS_MODULUS) revert InvalidScalar(y_coordinates[i]);
-        }
-
-        // 3. Build LHS and RHS MSM input buffers in one pass.
+        // 2. Build LHS and RHS MSM input buffers in one pass.
         //    LHS layout: [(π_i, r_i·z_i) for i in 0..n] || (C, Σr_i) || (G1_gen, -Σr_i·y_i)
         //    RHS layout: [(π_i, r_i)    for i in 0..n]
         //    Each slot is 128-byte point + 32-byte scalar = 160 bytes.
@@ -227,6 +220,11 @@ library BlobVerifier {
         uint256 rSum;
         uint256 ySum;
         for (uint256 i; i < n; ++i) {
+            // Validate scalars in range. The precompile would catch this too, but
+            // catching here gives a precise error and avoids unnecessary MSM work.
+            if (uint256(z_coordinates[i]) >= BLS_MODULUS) revert InvalidScalar(z_coordinates[i]);
+            if (uint256(y_coordinates[i]) >= BLS_MODULUS) revert InvalidScalar(y_coordinates[i]);
+
             uint256 r = _challengeScalar(seed, i, BLS_MODULUS);
             rSum = addmod(rSum, r, BLS_MODULUS);
             ySum = addmod(ySum, mulmod(r, uint256(y_coordinates[i]), BLS_MODULUS), BLS_MODULUS);
@@ -248,7 +246,7 @@ library BlobVerifier {
             }
         }
 
-        // 4. Append (C, Σr_i) and (G1_gen, -Σr_i·y_i) at the end of the LHS buffer.
+        // 3. Append (C, Σr_i) and (G1_gen, -Σr_i·y_i) at the end of the LHS buffer.
         bytes memory g1Gen = G1_GENERATOR;
         bytes32 commitmentScalar = bytes32(rSum);
         bytes32 g1GenScalar = bytes32(ySum == 0 ? 0 : BLS_MODULUS - ySum); // -ySum mod p
@@ -262,7 +260,7 @@ library BlobVerifier {
             mstore(add(gDst, 128), g1GenScalar)
         }
 
-        // 5. Two MSMs, then the shared pairing tail.
+        // 4. Two MSMs, then the shared pairing tail.
         _pairingCheckOrRevert(Bls12381.g1MsmRaw(lhsInput), Bls12381.g1MsmRaw(rhsInput));
     }
 
@@ -311,12 +309,6 @@ library BlobVerifier {
             return;
         }
 
-        // Bind each commitment to its claimed blobHash (also enforces 128-byte length via compress).
-        for (uint256 i; i < n; ++i) {
-            bytes32 derived = commitmentToVersionedHash(Bls12381.compress(commitments[i]));
-            if (derived != blobHashes[i]) revert CommitmentMismatch(blobHashes[i], derived);
-        }
-
         // Build the two MSM inputs in one pass:
         //   LHS layout: [(C_i, r_i) for i in 0..n]    (slots 0..n)
         //            || (RHS, z)                       (slot n)
@@ -330,6 +322,10 @@ library BlobVerifier {
         uint256 ySum;
 
         for (uint256 i; i < n; ++i) {
+            // Bind each commitment to its claimed blobHash (also enforces 128-byte length via compress).
+            bytes32 derived = commitmentToVersionedHash(Bls12381.compress(commitments[i]));
+            if (derived != blobHashes[i]) revert CommitmentMismatch(blobHashes[i], derived);
+
             if (uint256(y_coordinates[i]) >= modulus) revert InvalidScalar(y_coordinates[i]);
 
             uint256 r = _challengeScalar(seed, i, modulus);
