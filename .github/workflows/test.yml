@@ -36,13 +36,8 @@ jobs:
         run: |
           make test
         id: test
-
       - name: Run build benchmark
         run: |
-          cd benchmarks/scripts
-          npm install
-          npm run generate
-          cd ../../
           make build-benchmark
         id: build-benchmark
 
