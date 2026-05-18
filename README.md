@@ -1,5 +1,9 @@
 ## Blober - On-chain Blob Verification Library in Solidity ![Tests](https://github.com/markolazic01/blober/workflows/CI/badge.svg)
-**Blober** is a Solidity library for Ethereum blob verification (and more), by introducing a well designed set of blob point verification flows it eases helps the L2 settlements. 
+**Blober** is a Solidity library for Ethereum blob verification (and more), by introducing a well designed set of blob point verification flows it eases helps the L2 settlements.
+
+Innovative batch KZG point evaluation approach, which is the core of Blober, is also being separately documented on it's way of becoming an EIP.
+Follow the thread or read through the Ethereum Magicians topic here:
+https://ethereum-magicians.org/t/eip-xxxx-batch-kzg-point-evaluation-via-bls12-381-precompile-composition/28534
 
 ---
 ### Problem Solution
