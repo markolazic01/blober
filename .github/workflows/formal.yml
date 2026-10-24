@@ -1,0 +1,24 @@
+name: Formal
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lean:
+    name: Lean proofs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: formal
+          use-mathlib-cache: true
+
+      - name: Check axioms (no sorry)
+        working-directory: formal
+        run: |
+          lake env lean Axioms.lean | tee axioms.txt
+          if grep -q sorryAx axioms.txt; then echo "sorry found"; exit 1; fi
