@@ -47,6 +47,16 @@ contract BlobVerifierHarness {
         BlobVerifier.verifySinglePointMultipleBlobs128(blobHashes, z, y_coordinates, commitments, proofs);
     }
 
+    function verifyMultiplePointsMultipleBlobs128(
+        bytes32[] calldata blobHashes,
+        bytes32[] calldata z_coordinates,
+        bytes32[] calldata y_coordinates,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) external view {
+        BlobVerifier.verifyMultiplePointsMultipleBlobs128(blobHashes, z_coordinates, y_coordinates, commitments, proofs);
+    }
+
     function getBlobHash(uint256 blobIndex) external view returns (bytes32) {
         return BlobVerifier.getBlobHash(blobIndex);
     }

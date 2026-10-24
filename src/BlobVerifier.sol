@@ -47,6 +47,10 @@ library BlobVerifier {
     ///      overhead (two G1MSMs + one pairing) only pays off above this crossover.
     uint256 internal constant BATCH_THRESHOLD_128 = 5;
 
+    /// @dev Crossover for the general shape (distinct commitments and distinct evaluation points).
+    ///      Its LHS MSM has 2n+1 slots instead of n+2, so the batched path pays off one step later.
+    uint256 internal constant BATCH_THRESHOLD_GENERAL_128 = 6;
+
     /// @dev Ethereum mainnet KZG trusted setup point [s]G2 in EIP-2537 uncompressed encoding (256 bytes).
     ///      Decompressed from c-kzg-4844 trusted_setup.txt line 4100 (the second G2 point).
     bytes internal constant KZG_S_G2_MAINNET =
@@ -367,6 +371,114 @@ library BlobVerifier {
         _pairingCheckOrRevert(Bls12381.g1MsmRaw(lhsInput), rhs);
     }
 
+    /// @notice Verify n openings with distinct commitments AND distinct evaluation points using
+    ///         EIP-2537 batched pairing. This is the general shape; the two functions above are
+    ///         its factorisations for inputs that share z or share C.
+    /// @dev    All G1 points (commitments, proofs) are 128-byte EIP-2537 uncompressed encoding.
+    ///         Claim i is (blobHashes[i], commitments[i], z_coordinates[i], y_coordinates[i], proofs[i]).
+    ///         Nothing is required to be distinct: a blob may appear more than once, as may a point.
+    ///
+    ///         Verification equation, batched with Fiat-Shamir weights r_i:
+    ///           e(LHS, -G2_gen) · e(RHS, [s]G2) == 1
+    ///         where
+    ///           LHS = Σ r_i·C_i + Σ (r_i·z_i)·π_i - (Σ r_i·y_i)·G1_gen     (2n+1 slots)
+    ///           RHS = Σ r_i·π_i                                             (n slots)
+    ///
+    ///         This is the shape a rollup hits when each blob is opened at its own challenge point
+    ///         (z_i derived from C_i). The LHS cannot be factored, so it costs n-1 more MSM slots
+    ///         than the shared-z shape and the crossover sits at BATCH_THRESHOLD_GENERAL_128.
+    function verifyMultiplePointsMultipleBlobs128(
+        bytes32[] calldata blobHashes,
+        bytes32[] calldata z_coordinates,
+        bytes32[] calldata y_coordinates,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) internal view {
+        uint256 n = blobHashes.length;
+        if (n == 0) revert ArrayLengthMismatch();
+        if (n != z_coordinates.length || n != y_coordinates.length || n != commitments.length || n != proofs.length) {
+            revert ArrayLengthMismatch();
+        }
+
+        uint256 modulus = BLS_MODULUS;
+
+        // Threshold fallback: loop 0x0A on compressed inputs. 0x0A binds commitment to blobHash
+        // and range-checks scalars internally; we pre-check scalars for a uniform error surface.
+        if (n < BATCH_THRESHOLD_GENERAL_128) {
+            for (uint256 i; i < n; ++i) {
+                if (uint256(z_coordinates[i]) >= modulus) revert InvalidScalar(z_coordinates[i]);
+                if (uint256(y_coordinates[i]) >= modulus) revert InvalidScalar(y_coordinates[i]);
+                bytes calldata proof = proofs[i];
+                if (proof.length != 128) revert InvalidProofLength(proof.length);
+
+                bytes memory cComp = Bls12381.compress(commitments[i]);
+                bytes memory pComp = Bls12381.compress(proof);
+                _callPointEvaluation(abi.encodePacked(blobHashes[i], z_coordinates[i], y_coordinates[i], cComp, pComp));
+            }
+            return;
+        }
+
+        // Build the two MSM inputs in one pass:
+        //   LHS layout: [(C_i, r_i)       for i in 0..n]   (slots 0..n-1)
+        //            || [(π_i, r_i·z_i)   for i in 0..n]   (slots n..2n-1)
+        //            || (G1_gen, -Σ r_i·y_i)               (slot 2n)
+        //   RHS layout: [(π_i, r_i)       for i in 0..n]
+        // Each slot is 128-byte point + 32-byte scalar = 160 bytes.
+        bytes memory lhsInput = new bytes((2 * n + 1) * 160);
+        bytes memory rhsInput = new bytes(n * 160);
+
+        bytes32 seed = _challengeSeed128(blobHashes, z_coordinates, y_coordinates, commitments, proofs);
+        uint256 ySum;
+
+        for (uint256 i; i < n; ++i) {
+            // Bind each commitment to its claimed blobHash (also enforces 128-byte length via compress).
+            bytes32 derived = commitmentToVersionedHash(Bls12381.compress(commitments[i]));
+            if (derived != blobHashes[i]) revert CommitmentMismatch(blobHashes[i], derived);
+
+            if (uint256(z_coordinates[i]) >= modulus) revert InvalidScalar(z_coordinates[i]);
+            if (uint256(y_coordinates[i]) >= modulus) revert InvalidScalar(y_coordinates[i]);
+
+            uint256 r = _challengeScalar(seed, i, modulus);
+            ySum = addmod(ySum, mulmod(r, uint256(y_coordinates[i]), modulus), modulus);
+
+            bytes32 rScalar = bytes32(r);
+            bytes32 rzScalar = bytes32(mulmod(r, uint256(z_coordinates[i]), modulus));
+            bytes calldata commitment = commitments[i];
+            bytes calldata proof = proofs[i];
+            if (proof.length != 128) revert InvalidProofLength(proof.length);
+
+            // Memory-safe: writes stay inside the two pre-allocated buffers.
+            assembly ("memory-safe") {
+                // LHS commitment slot i: (C_i, r_i)
+                let cDst := add(add(lhsInput, 0x20), mul(i, 160))
+                calldatacopy(cDst, commitment.offset, 128)
+                mstore(add(cDst, 128), rScalar)
+
+                // LHS proof slot n+i: (π_i, r_i·z_i)
+                let pDst := add(add(lhsInput, 0x20), mul(add(n, i), 160))
+                calldatacopy(pDst, proof.offset, 128)
+                mstore(add(pDst, 128), rzScalar)
+
+                // RHS proof slot i: (π_i, r_i)
+                let rDst := add(add(rhsInput, 0x20), mul(i, 160))
+                calldatacopy(rDst, proof.offset, 128)
+                mstore(add(rDst, 128), rScalar)
+            }
+        }
+
+        // Append (G1_gen, -Σ r_i·y_i) at slot 2n.
+        bytes memory g1Gen = G1_GENERATOR;
+        bytes32 g1GenScalar = bytes32(ySum == 0 ? 0 : modulus - ySum);
+        assembly ("memory-safe") {
+            let gDst := add(add(lhsInput, 0x20), mul(mul(2, n), 160))
+            mcopy(gDst, add(g1Gen, 0x20), 128)
+            mstore(add(gDst, 128), g1GenScalar)
+        }
+
+        // The two MSMs are independent here (no RHS reuse), then the shared pairing tail.
+        _pairingCheckOrRevert(Bls12381.g1MsmRaw(lhsInput), Bls12381.g1MsmRaw(rhsInput));
+    }
+
     // ──────────────────────────────────────────────────────────────────────
     //  Internals
     // ──────────────────────────────────────────────────────────────────────
@@ -428,6 +540,21 @@ library BlobVerifier {
     ) private pure returns (bytes32) {
         return keccak256(
             abi.encode("BlobVerifier.verifySinglePointMultipleBlobs128", blobHashes, z, ys, commitments, proofs)
+        );
+    }
+
+    /// @dev Fiat-Shamir transcript for verifyMultiplePointsMultipleBlobs128 (general shape).
+    ///      Every prover-controlled input is hashed; the domain string keeps this transcript
+    ///      space disjoint from the two factored shapes even where ABI encodings could collide.
+    function _challengeSeed128(
+        bytes32[] calldata blobHashes,
+        bytes32[] calldata zs,
+        bytes32[] calldata ys,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) private pure returns (bytes32) {
+        return keccak256(
+            abi.encode("BlobVerifier.verifyMultiplePointsMultipleBlobs128", blobHashes, zs, ys, commitments, proofs)
         );
     }
 
