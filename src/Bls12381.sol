@@ -17,7 +17,6 @@ library Bls12381 {
     address internal constant G1ADD_PRECOMPILE = address(0x0B);
     address internal constant G1MSM_PRECOMPILE = address(0x0C);
     address internal constant PAIRING_PRECOMPILE = address(0x0F);
-    address internal constant MODEXP_PRECOMPILE = address(0x05);
 
     // ──────────────────────────────────────────────────────────────────────
     //  Gas caps (EIP-2537 prices)
@@ -203,31 +202,25 @@ library Bls12381 {
     }
 
     /// @notice Revert unless `point` is the point at infinity or satisfies y² = x³ + 4 over Fp.
-    /// @dev    Assumes `requireCanonical(point)` passed. Two MODEXP calls (~1k gas). Needed wherever a
-    ///         128-byte point is compressed without going through an EIP-2537 precompile: compression
-    ///         reads only x and the sign of y, so an off-curve y would otherwise go unnoticed.
+    /// @dev    Adds the point to infinity with G1ADD, which checks the curve equation but not subgroup
+    ///         membership (EIP-2537), for ~700 gas. Needed wherever a 128-byte point is compressed
+    ///         without going through an EIP-2537 precompile: compression reads only x and the sign of
+    ///         y, so an off-curve y would otherwise go unnoticed. Subgroup membership is then checked
+    ///         by 0x0A when it decompresses. A rejected point costs `G1ADD_GAS`.
     function requireOnCurve(bytes calldata point) internal view {
-        (uint256 xHi, uint256 xLo, uint256 yHi, uint256 yLo,) = _words(point);
-        if (xHi | xLo | yHi | yLo == 0) return; // infinity
-
-        (uint256 lhsHi, uint256 lhsLo) = _modexpFp(yHi, yLo, 2);
-        (uint256 cubeHi, uint256 cubeLo) = _modexpFp(xHi, xLo, 3);
-
-        // rhs = (x³ + 4) mod p. x³ < p < 2^381, so the sum fits in (hi, lo) and needs at most one
-        // subtraction. The subtraction branch never precedes an accept: it needs y² ∈ {0, 1, 2, 3},
-        // and none of those is reachable on this curve (no 2-torsion; -3 has no cube root; 2 and 3
-        // are non-residues mod p).
-        uint256 rhsLo;
-        uint256 rhsHi;
-        unchecked {
-            rhsLo = cubeLo + 4;
-            rhsHi = cubeHi + (rhsLo < cubeLo ? 1 : 0);
-            if (!_ltP(rhsHi, rhsLo)) {
-                rhsHi = rhsHi - P_HI - (rhsLo < P_LO ? 1 : 0);
-                rhsLo = rhsLo - P_LO;
-            }
+        bool ok;
+        // Input: point || 128 zero bytes (infinity), written as scratch past the free memory
+        // pointer and never allocated; the output overwrites the point.
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            calldatacopy(ptr, point.offset, 0x80)
+            mstore(add(ptr, 0x80), 0)
+            mstore(add(ptr, 0xa0), 0)
+            mstore(add(ptr, 0xc0), 0)
+            mstore(add(ptr, 0xe0), 0)
+            ok := staticcall(G1ADD_GAS, 0x0b, ptr, 0x100, ptr, 0x80) // G1ADD_PRECOMPILE
         }
-        if (lhsHi != rhsHi || lhsLo != rhsLo) revert G1PointNotOnCurve();
+        if (!ok) revert G1PointNotOnCurve();
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -277,28 +270,6 @@ library Bls12381 {
     /// @dev (hi, lo) < p, comparing the 16-byte high halves first.
     function _ltP(uint256 hi, uint256 lo) private pure returns (bool) {
         return hi < P_HI || (hi == P_HI && lo < P_LO);
-    }
-
-    /// @dev base^e mod p via the MODEXP precompile, for a 48-byte base given as (hi, lo).
-    function _modexpFp(uint256 hi, uint256 lo, uint8 e) private view returns (uint256 rHi, uint256 rLo) {
-        bool ok;
-        // Input: len(B)=48 || len(E)=1 || len(M)=48 || B (48) || E (1) || M (48) = 0xc1 bytes,
-        // written as scratch past the free memory pointer and never allocated.
-        assembly ("memory-safe") {
-            let ptr := mload(0x40)
-            mstore(ptr, 48)
-            mstore(add(ptr, 0x20), 1)
-            mstore(add(ptr, 0x40), 48)
-            mstore(add(ptr, 0x60), shl(128, hi)) // B[0..16]; the zero tail is overwritten next
-            mstore(add(ptr, 0x70), lo) // B[16..48]
-            mstore8(add(ptr, 0x90), e)
-            mstore(add(ptr, 0x91), shl(128, P_HI)) // M[0..16]
-            mstore(add(ptr, 0xa1), P_LO) // M[16..48]
-            ok := staticcall(gas(), 0x05, ptr, 0xc1, ptr, 0x30) // MODEXP_PRECOMPILE
-            rHi := shr(128, mload(ptr))
-            rLo := mload(add(ptr, 0x10))
-        }
-        if (!ok) revert PrecompileCallFailed(MODEXP_PRECOMPILE);
     }
 
     function _requireG1Length(bytes memory point) private pure {

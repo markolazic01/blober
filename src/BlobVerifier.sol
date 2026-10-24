@@ -48,8 +48,9 @@ library BlobVerifier {
     /// @dev Below this opening count the *128 batched verifiers fall back to looping the
     ///      EIP-4844 0x0A precompile on the compressed form. The EIP-2537 batched path's fixed
     ///      overhead (two G1MSMs + one pairing) only pays off above this crossover. Measured
-    ///      against the fallback as implemented, including its on-curve checks (~3k gas per point):
-    ///      at n = 4 the batched path is ~6% cheaper for the shared-z and shared-C shapes.
+    ///      against the fallback as implemented, including its encoding and on-curve checks: at
+    ///      n = 4 the batched path is ~2% cheaper for the shared-z and shared-C shapes, and ~18%
+    ///      dearer at n = 3 (`test_threshold_crossover` in benchmarks/test/Compare.t.sol).
     uint256 internal constant BATCH_THRESHOLD_128 = 4;
 
     /// @dev Crossover for the general shape (distinct commitments and distinct evaluation points).

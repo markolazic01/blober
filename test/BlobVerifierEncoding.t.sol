@@ -113,11 +113,8 @@ contract BlobVerifierEncodingTest is Fixtures {
         harness.requireOnCurve(moved);
     }
 
-    /// @dev x = p - 1 gives x³ ≡ -1, so x³ + 4 ≥ p and `requireOnCurve` takes its reduction
-    ///      branch. No such point is on the curve: it would need y² ≡ 3, and 3 is not a square
-    ///      mod p (likewise y² ∈ {0, 1, 2} for the other x³ ∈ [p-4, p) are unreachable), so the
-    ///      branch can only ever end in a revert.
-    function test_requireOnCurve_reductionBranch_rejects() public {
+    /// @dev x = p - 1 is the largest canonical x; with the generator's y it is off the curve.
+    function test_requireOnCurve_largestX_rejects() public {
         bytes memory point = bytes.concat(BlobVerifier.G1_GENERATOR);
         for (uint256 i; i < 48; ++i) {
             point[16 + i] = P_BYTES[i];
