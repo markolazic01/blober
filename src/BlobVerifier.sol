@@ -11,6 +11,9 @@ library BlobVerifier {
     /// @dev Address of the EIP-4844 point evaluation precompile.
     address internal constant POINT_EVALUATION_PRECOMPILE = address(0x0A);
 
+    /// @dev EIP-4844 price of one point evaluation; also the gas forwarded to each call.
+    uint256 internal constant POINT_EVALUATION_PRECOMPILE_GAS = 50000;
+
     /// @dev Version byte prepended to KZG commitment hashes (EIP-4844 §Helpers).
     bytes1 internal constant VERSIONED_HASH_VERSION_KZG = 0x01;
 
@@ -44,12 +47,14 @@ library BlobVerifier {
 
     /// @dev Below this opening count the *128 batched verifiers fall back to looping the
     ///      EIP-4844 0x0A precompile on the compressed form. The EIP-2537 batched path's fixed
-    ///      overhead (two G1MSMs + one pairing) only pays off above this crossover.
-    uint256 internal constant BATCH_THRESHOLD_128 = 5;
+    ///      overhead (two G1MSMs + one pairing) only pays off above this crossover. Measured
+    ///      against the fallback as implemented, including its on-curve checks (~3k gas per point):
+    ///      at n = 4 the batched path is ~6% cheaper for the shared-z and shared-C shapes.
+    uint256 internal constant BATCH_THRESHOLD_128 = 4;
 
     /// @dev Crossover for the general shape (distinct commitments and distinct evaluation points).
     ///      Its LHS MSM has 2n+1 slots instead of n+2, so the batched path pays off one step later.
-    uint256 internal constant BATCH_THRESHOLD_GENERAL_128 = 6;
+    uint256 internal constant BATCH_THRESHOLD_GENERAL_128 = 5;
 
     /// @dev Ethereum mainnet KZG trusted setup point [s]G2 in EIP-2537 uncompressed encoding (256 bytes).
     ///      Decompressed from c-kzg-4844 trusted_setup.txt line 4100 (the second G2 point).
@@ -165,6 +170,10 @@ library BlobVerifier {
     // ──────────────────────────────────────────────────────────────────────
     //  Core verifiers — 128-byte (uncompressed, EIP-2537 batched)
     //  One amortized pairing check via G1_MSM (0x0C) + PAIRING_CHECK (0x0F).
+    //
+    //  Each verifier checks array shapes, then dispatches on n to a 0x0A loop (`_…Loop`) or the
+    //  batched pairing (`_…Batched`). Both paths validate every 128-byte point before use, so they
+    //  accept exactly the same inputs, up to the batched path's 1/q soundness error.
     // ──────────────────────────────────────────────────────────────────────
 
     /// @notice Verify multiple openings of a single blob using EIP-2537 batched pairing.
@@ -187,29 +196,62 @@ library BlobVerifier {
         if (n == 0) revert ArrayLengthMismatch();
         if (n != y_coordinates.length || n != proofs.length) revert ArrayLengthMismatch();
 
-        // Threshold fallback: at small n, looping 0x0A on compressed inputs is
-        // cheaper than the EIP-2537 batched pairing. Compress the (single) commitment
-        // once and the proofs per iteration; 0x0A validates each opening individually.
+        // At small n, looping 0x0A on compressed inputs is cheaper than the batched pairing.
         if (n < BATCH_THRESHOLD_128) {
-            bytes memory cComp = Bls12381.compress(commitment);
-            for (uint256 i; i < n; ++i) {
-                if (uint256(z_coordinates[i]) >= BLS_MODULUS) revert InvalidScalar(z_coordinates[i]);
-                if (uint256(y_coordinates[i]) >= BLS_MODULUS) revert InvalidScalar(y_coordinates[i]);
-                bytes calldata proof = proofs[i];
-                if (proof.length != 128) revert InvalidProofLength(proof.length);
+            _verifyMultiplePoints128Loop(blobHash, z_coordinates, y_coordinates, commitment, proofs);
+        } else {
+            _verifyMultiplePoints128Batched(blobHash, z_coordinates, y_coordinates, commitment, proofs);
+        }
+    }
 
-                bytes memory pComp = Bls12381.compress(proof);
-                _callPointEvaluation(abi.encodePacked(blobHash, z_coordinates[i], y_coordinates[i], cComp, pComp));
-            }
-            return;
+    /// @dev 0x0A loop for `verifyMultiplePoints128`. Array shapes are checked by the caller.
+    ///      0x0A binds the commitment to `blobHash` and checks subgroup membership of the
+    ///      compressed points; the on-curve checks make the compressed form faithful to the input.
+    function _verifyMultiplePoints128Loop(
+        bytes32 blobHash,
+        bytes32[] calldata z_coordinates,
+        bytes32[] calldata y_coordinates,
+        bytes calldata commitment,
+        bytes[] calldata proofs
+    ) internal view {
+        uint256 n = z_coordinates.length;
+        _requireCommitment128(commitment);
+        Bls12381.requireOnCurve(commitment);
+        for (uint256 i; i < n; ++i) {
+            _requireScalar(z_coordinates[i]);
+            _requireScalar(y_coordinates[i]);
+            _requireProof128(proofs[i]);
+            Bls12381.requireOnCurve(proofs[i]);
         }
 
-        // 1. Bind the uncompressed commitment to the claimed blobHash by computing
-        //    its compressed form, sha256-ing it, and matching against blobHash.
-        //    `compress` validates length == 128.
+        bytes memory cComp = Bls12381.compress(commitment);
+        for (uint256 i; i < n; ++i) {
+            bytes memory pComp = Bls12381.compress(proofs[i]);
+            _callPointEvaluation(abi.encodePacked(blobHash, z_coordinates[i], y_coordinates[i], cComp, pComp));
+        }
+    }
+
+    /// @dev Batched path for `verifyMultiplePoints128`. Array shapes are checked by the caller.
+    function _verifyMultiplePoints128Batched(
+        bytes32 blobHash,
+        bytes32[] calldata z_coordinates,
+        bytes32[] calldata y_coordinates,
+        bytes calldata commitment,
+        bytes[] calldata proofs
+    ) internal view {
+        uint256 n = z_coordinates.length;
+
+        // 1. Validate every input before hashing: bind the commitment to blobHash (the check 0x0A
+        //    would otherwise do), range-check scalars, and reject non-canonical point encodings.
+        _requireCommitment128(commitment);
         {
             bytes32 derived = commitmentToVersionedHash(Bls12381.compress(commitment));
             if (derived != blobHash) revert CommitmentMismatch(blobHash, derived);
+        }
+        for (uint256 i; i < n; ++i) {
+            _requireScalar(z_coordinates[i]);
+            _requireScalar(y_coordinates[i]);
+            _requireProof128(proofs[i]);
         }
 
         // 2. Build LHS and RHS MSM input buffers in one pass.
@@ -224,11 +266,6 @@ library BlobVerifier {
         uint256 rSum;
         uint256 ySum;
         for (uint256 i; i < n; ++i) {
-            // Validate scalars in range. The precompile would catch this too, but
-            // catching here gives a precise error and avoids unnecessary MSM work.
-            if (uint256(z_coordinates[i]) >= BLS_MODULUS) revert InvalidScalar(z_coordinates[i]);
-            if (uint256(y_coordinates[i]) >= BLS_MODULUS) revert InvalidScalar(y_coordinates[i]);
-
             uint256 r = _challengeScalar(seed, i, BLS_MODULUS);
             rSum = addmod(rSum, r, BLS_MODULUS);
             ySum = addmod(ySum, mulmod(r, uint256(y_coordinates[i]), BLS_MODULUS), BLS_MODULUS);
@@ -236,7 +273,6 @@ library BlobVerifier {
             bytes32 lScalar = bytes32(mulmod(r, uint256(z_coordinates[i]), BLS_MODULUS));
             bytes32 rScalar = bytes32(r);
             bytes calldata proof = proofs[i];
-            if (proof.length != 128) revert InvalidProofLength(proof.length);
 
             // Copy the same proof into both buffers, paired with its respective scalar.
             // Memory-safe: writes stay inside the two pre-allocated buffers.
@@ -294,23 +330,57 @@ library BlobVerifier {
             revert ArrayLengthMismatch();
         }
 
-        uint256 modulus = uint256(BLS_MODULUS);
-        if (uint256(z) >= modulus) revert InvalidScalar(z);
-
-        // Threshold fallback: at small n, looping 0x0A on compressed inputs beats the
-        // batched pairing. The 0x0A precompile validates commitment-to-blobHash binding
-        // internally, so we skip the explicit binding pass.
         if (n < BATCH_THRESHOLD_128) {
-            for (uint256 i; i < n; ++i) {
-                if (uint256(y_coordinates[i]) >= modulus) revert InvalidScalar(y_coordinates[i]);
-                bytes calldata proof = proofs[i];
-                if (proof.length != 128) revert InvalidProofLength(proof.length);
+            _verifySinglePointMultipleBlobs128Loop(blobHashes, z, y_coordinates, commitments, proofs);
+        } else {
+            _verifySinglePointMultipleBlobs128Batched(blobHashes, z, y_coordinates, commitments, proofs);
+        }
+    }
 
-                bytes memory cComp = Bls12381.compress(commitments[i]);
-                bytes memory pComp = Bls12381.compress(proof);
-                _callPointEvaluation(abi.encodePacked(blobHashes[i], z, y_coordinates[i], cComp, pComp));
-            }
-            return;
+    /// @dev 0x0A loop for `verifySinglePointMultipleBlobs128`. Array shapes are checked by the caller.
+    function _verifySinglePointMultipleBlobs128Loop(
+        bytes32[] calldata blobHashes,
+        bytes32 z,
+        bytes32[] calldata y_coordinates,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) internal view {
+        uint256 n = blobHashes.length;
+        _requireScalar(z);
+        for (uint256 i; i < n; ++i) {
+            _requireScalar(y_coordinates[i]);
+            _requireCommitment128(commitments[i]);
+            Bls12381.requireOnCurve(commitments[i]);
+            _requireProof128(proofs[i]);
+            Bls12381.requireOnCurve(proofs[i]);
+        }
+
+        for (uint256 i; i < n; ++i) {
+            bytes memory cComp = Bls12381.compress(commitments[i]);
+            bytes memory pComp = Bls12381.compress(proofs[i]);
+            _callPointEvaluation(abi.encodePacked(blobHashes[i], z, y_coordinates[i], cComp, pComp));
+        }
+    }
+
+    /// @dev Batched path for `verifySinglePointMultipleBlobs128`. Array shapes are checked by the caller.
+    function _verifySinglePointMultipleBlobs128Batched(
+        bytes32[] calldata blobHashes,
+        bytes32 z,
+        bytes32[] calldata y_coordinates,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) internal view {
+        uint256 n = blobHashes.length;
+
+        // Validate every input before hashing: bind each commitment to its claimed blobHash
+        // (the check 0x0A would otherwise do), range-check scalars, reject non-canonical encodings.
+        _requireScalar(z);
+        for (uint256 i; i < n; ++i) {
+            _requireCommitment128(commitments[i]);
+            bytes32 derived = commitmentToVersionedHash(Bls12381.compress(commitments[i]));
+            if (derived != blobHashes[i]) revert CommitmentMismatch(blobHashes[i], derived);
+            _requireScalar(y_coordinates[i]);
+            _requireProof128(proofs[i]);
         }
 
         // Build the two MSM inputs in one pass:
@@ -326,19 +396,12 @@ library BlobVerifier {
         uint256 ySum;
 
         for (uint256 i; i < n; ++i) {
-            // Bind each commitment to its claimed blobHash (also enforces 128-byte length via compress).
-            bytes32 derived = commitmentToVersionedHash(Bls12381.compress(commitments[i]));
-            if (derived != blobHashes[i]) revert CommitmentMismatch(blobHashes[i], derived);
-
-            if (uint256(y_coordinates[i]) >= modulus) revert InvalidScalar(y_coordinates[i]);
-
-            uint256 r = _challengeScalar(seed, i, modulus);
-            ySum = addmod(ySum, mulmod(r, uint256(y_coordinates[i]), modulus), modulus);
+            uint256 r = _challengeScalar(seed, i, BLS_MODULUS);
+            ySum = addmod(ySum, mulmod(r, uint256(y_coordinates[i]), BLS_MODULUS), BLS_MODULUS);
 
             bytes32 rScalar = bytes32(r);
             bytes calldata commitment = commitments[i];
             bytes calldata proof = proofs[i];
-            if (proof.length != 128) revert InvalidProofLength(proof.length);
 
             // LHS commitment slot at i: (C_i, r_i). RHS proof slot at i: (π_i, r_i).
             assembly ("memory-safe") {
@@ -357,7 +420,7 @@ library BlobVerifier {
 
         // Append (RHS, z) at slot n and (G1_gen, -Σ r_i·y_i) at slot n+1.
         bytes memory g1Gen = G1_GENERATOR;
-        bytes32 g1GenScalar = bytes32(ySum == 0 ? 0 : modulus - ySum);
+        bytes32 g1GenScalar = bytes32(ySum == 0 ? 0 : BLS_MODULUS - ySum);
         assembly ("memory-safe") {
             let rhsSlot := add(add(lhsInput, 0x20), mul(n, 160))
             mcopy(rhsSlot, add(rhs, 0x20), 128)
@@ -400,52 +463,93 @@ library BlobVerifier {
             revert ArrayLengthMismatch();
         }
 
-        uint256 modulus = BLS_MODULUS;
-
-        // Threshold fallback: loop 0x0A on compressed inputs. 0x0A binds commitment to blobHash
-        // and range-checks scalars internally; we pre-check scalars for a uniform error surface.
         if (n < BATCH_THRESHOLD_GENERAL_128) {
-            for (uint256 i; i < n; ++i) {
-                if (uint256(z_coordinates[i]) >= modulus) revert InvalidScalar(z_coordinates[i]);
-                if (uint256(y_coordinates[i]) >= modulus) revert InvalidScalar(y_coordinates[i]);
-                bytes calldata proof = proofs[i];
-                if (proof.length != 128) revert InvalidProofLength(proof.length);
+            _verifyMultiplePointsMultipleBlobs128Loop(blobHashes, z_coordinates, y_coordinates, commitments, proofs);
+        } else {
+            _verifyMultiplePointsMultipleBlobs128Batched(blobHashes, z_coordinates, y_coordinates, commitments, proofs);
+        }
+    }
 
-                bytes memory cComp = Bls12381.compress(commitments[i]);
-                bytes memory pComp = Bls12381.compress(proof);
-                _callPointEvaluation(abi.encodePacked(blobHashes[i], z_coordinates[i], y_coordinates[i], cComp, pComp));
-            }
-            return;
+    /// @dev 0x0A loop for `verifyMultiplePointsMultipleBlobs128`. Array shapes are checked by the caller.
+    function _verifyMultiplePointsMultipleBlobs128Loop(
+        bytes32[] calldata blobHashes,
+        bytes32[] calldata z_coordinates,
+        bytes32[] calldata y_coordinates,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) internal view {
+        uint256 n = blobHashes.length;
+        for (uint256 i; i < n; ++i) {
+            _requireScalar(z_coordinates[i]);
+            _requireScalar(y_coordinates[i]);
+            _requireCommitment128(commitments[i]);
+            Bls12381.requireOnCurve(commitments[i]);
+            _requireProof128(proofs[i]);
+            Bls12381.requireOnCurve(proofs[i]);
         }
 
-        // Build the two MSM inputs in one pass:
-        //   LHS layout: [(C_i, r_i)       for i in 0..n]   (slots 0..n-1)
-        //            || [(π_i, r_i·z_i)   for i in 0..n]   (slots n..2n-1)
-        //            || (G1_gen, -Σ r_i·y_i)               (slot 2n)
-        //   RHS layout: [(π_i, r_i)       for i in 0..n]
-        // Each slot is 128-byte point + 32-byte scalar = 160 bytes.
-        bytes memory lhsInput = new bytes((2 * n + 1) * 160);
-        bytes memory rhsInput = new bytes(n * 160);
+        for (uint256 i; i < n; ++i) {
+            bytes memory cComp = Bls12381.compress(commitments[i]);
+            bytes memory pComp = Bls12381.compress(proofs[i]);
+            _callPointEvaluation(abi.encodePacked(blobHashes[i], z_coordinates[i], y_coordinates[i], cComp, pComp));
+        }
+    }
+
+    /// @dev Batched path for `verifyMultiplePointsMultipleBlobs128`. Array shapes are checked by the caller.
+    function _verifyMultiplePointsMultipleBlobs128Batched(
+        bytes32[] calldata blobHashes,
+        bytes32[] calldata z_coordinates,
+        bytes32[] calldata y_coordinates,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) internal view {
+        uint256 n = blobHashes.length;
+
+        // Validate every input before hashing: bind each commitment to its claimed blobHash
+        // (the check 0x0A would otherwise do), range-check scalars, reject non-canonical encodings.
+        for (uint256 i; i < n; ++i) {
+            _requireCommitment128(commitments[i]);
+            bytes32 derived = commitmentToVersionedHash(Bls12381.compress(commitments[i]));
+            if (derived != blobHashes[i]) revert CommitmentMismatch(blobHashes[i], derived);
+            _requireScalar(z_coordinates[i]);
+            _requireScalar(y_coordinates[i]);
+            _requireProof128(proofs[i]);
+        }
 
         bytes32 seed = _challengeSeed128(blobHashes, z_coordinates, y_coordinates, commitments, proofs);
+        (bytes memory lhsInput, bytes memory rhsInput) =
+            _generalMsmInputs(seed, z_coordinates, y_coordinates, commitments, proofs);
+
+        // The two MSMs are independent here (no RHS reuse), then the shared pairing tail.
+        _pairingCheckOrRevert(Bls12381.g1MsmRaw(lhsInput), Bls12381.g1MsmRaw(rhsInput));
+    }
+
+    /// @dev MSM inputs for the general shape, in one pass over the claims:
+    ///        LHS layout: [(C_i, r_i)       for i in 0..n]   (slots 0..n-1)
+    ///                 || [(π_i, r_i·z_i)   for i in 0..n]   (slots n..2n-1)
+    ///                 || (G1_gen, -Σ r_i·y_i)               (slot 2n)
+    ///        RHS layout: [(π_i, r_i)       for i in 0..n]
+    ///      Each slot is 128-byte point + 32-byte scalar = 160 bytes. Inputs are already validated.
+    function _generalMsmInputs(
+        bytes32 seed,
+        bytes32[] calldata z_coordinates,
+        bytes32[] calldata y_coordinates,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) private pure returns (bytes memory lhsInput, bytes memory rhsInput) {
+        uint256 n = z_coordinates.length;
+        lhsInput = new bytes((2 * n + 1) * 160);
+        rhsInput = new bytes(n * 160);
         uint256 ySum;
 
         for (uint256 i; i < n; ++i) {
-            // Bind each commitment to its claimed blobHash (also enforces 128-byte length via compress).
-            bytes32 derived = commitmentToVersionedHash(Bls12381.compress(commitments[i]));
-            if (derived != blobHashes[i]) revert CommitmentMismatch(blobHashes[i], derived);
-
-            if (uint256(z_coordinates[i]) >= modulus) revert InvalidScalar(z_coordinates[i]);
-            if (uint256(y_coordinates[i]) >= modulus) revert InvalidScalar(y_coordinates[i]);
-
-            uint256 r = _challengeScalar(seed, i, modulus);
-            ySum = addmod(ySum, mulmod(r, uint256(y_coordinates[i]), modulus), modulus);
+            uint256 r = _challengeScalar(seed, i, BLS_MODULUS);
+            ySum = addmod(ySum, mulmod(r, uint256(y_coordinates[i]), BLS_MODULUS), BLS_MODULUS);
 
             bytes32 rScalar = bytes32(r);
-            bytes32 rzScalar = bytes32(mulmod(r, uint256(z_coordinates[i]), modulus));
+            bytes32 rzScalar = bytes32(mulmod(r, uint256(z_coordinates[i]), BLS_MODULUS));
             bytes calldata commitment = commitments[i];
             bytes calldata proof = proofs[i];
-            if (proof.length != 128) revert InvalidProofLength(proof.length);
 
             // Memory-safe: writes stay inside the two pre-allocated buffers.
             assembly ("memory-safe") {
@@ -468,20 +572,34 @@ library BlobVerifier {
 
         // Append (G1_gen, -Σ r_i·y_i) at slot 2n.
         bytes memory g1Gen = G1_GENERATOR;
-        bytes32 g1GenScalar = bytes32(ySum == 0 ? 0 : modulus - ySum);
+        bytes32 g1GenScalar = bytes32(ySum == 0 ? 0 : BLS_MODULUS - ySum);
         assembly ("memory-safe") {
             let gDst := add(add(lhsInput, 0x20), mul(mul(2, n), 160))
             mcopy(gDst, add(g1Gen, 0x20), 128)
             mstore(add(gDst, 128), g1GenScalar)
         }
-
-        // The two MSMs are independent here (no RHS reuse), then the shared pairing tail.
-        _pairingCheckOrRevert(Bls12381.g1MsmRaw(lhsInput), Bls12381.g1MsmRaw(rhsInput));
     }
 
     // ──────────────────────────────────────────────────────────────────────
     //  Internals
     // ──────────────────────────────────────────────────────────────────────
+
+    /// @dev Scalars (z, y) must be canonical field elements, as 0x0A requires.
+    function _requireScalar(bytes32 value) private pure {
+        if (uint256(value) >= BLS_MODULUS) revert InvalidScalar(value);
+    }
+
+    /// @dev A 128-byte commitment must have the right length and a canonical EIP-2537 encoding.
+    function _requireCommitment128(bytes calldata commitment) private pure {
+        if (commitment.length != Bls12381.G1_POINT_SIZE) revert Bls12381.InvalidG1PointLength(commitment.length);
+        Bls12381.requireCanonical(commitment);
+    }
+
+    /// @dev A 128-byte proof must have the right length and a canonical EIP-2537 encoding.
+    function _requireProof128(bytes calldata proof) private pure {
+        if (proof.length != Bls12381.G1_POINT_SIZE) revert InvalidProofLength(proof.length);
+        Bls12381.requireCanonical(proof);
+    }
 
     function _verifySinglePoint(
         bytes32 versionedHash,
@@ -501,8 +619,11 @@ library BlobVerifier {
     ///      Shared by `_verifySinglePoint` (48-byte calldata path) and the *128 threshold
     ///      fallback paths. Each caller builds the input via `abi.encodePacked(...)`,
     ///      sidestepping the calldata-vs-memory mismatch in the function arguments.
+    ///      Forwards exactly the precompile's price, so a rejected input costs 50,000 gas rather
+    ///      than all forwarded gas.
     function _callPointEvaluation(bytes memory input) private view {
-        (bool ok, bytes memory output) = POINT_EVALUATION_PRECOMPILE.staticcall(input);
+        (bool ok, bytes memory output) =
+            POINT_EVALUATION_PRECOMPILE.staticcall{gas: POINT_EVALUATION_PRECOMPILE_GAS}(input);
         if (!ok) revert PointEvaluationPrecompileCallFailed();
         if (keccak256(output) != POINT_EVALUATION_PRECOMPILE_OUTPUT) revert InvalidPointEvaluationPrecompileOutput();
     }
