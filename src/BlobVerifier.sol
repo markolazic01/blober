@@ -255,53 +255,12 @@ library BlobVerifier {
             _requireProof128(proofs[i]);
         }
 
-        // 2. Build LHS and RHS MSM input buffers in one pass.
-        //    LHS layout: [(π_i, r_i·z_i) for i in 0..n] || (C, Σr_i) || (G1_gen, -Σr_i·y_i)
-        //    RHS layout: [(π_i, r_i)    for i in 0..n]
-        //    Each slot is 128-byte point + 32-byte scalar = 160 bytes.
-        bytes memory lhsInput = new bytes((n + 2) * 160);
-        bytes memory rhsInput = new bytes(n * 160);
-
+        // 2. Derive the challenges from every input, then build both MSM input buffers.
         bytes32 seed = _challengeSeed128(blobHash, z_coordinates, y_coordinates, commitment, proofs);
+        (bytes memory lhsInput, bytes memory rhsInput) =
+            _sharedCMsmInputs(seed, z_coordinates, y_coordinates, commitment, proofs);
 
-        uint256 rSum;
-        uint256 ySum;
-        for (uint256 i; i < n; ++i) {
-            uint256 r = _challengeScalar(seed, i, BLS_MODULUS);
-            rSum = addmod(rSum, r, BLS_MODULUS);
-            ySum = addmod(ySum, mulmod(r, uint256(y_coordinates[i]), BLS_MODULUS), BLS_MODULUS);
-
-            bytes32 lScalar = bytes32(mulmod(r, uint256(z_coordinates[i]), BLS_MODULUS));
-            bytes32 rScalar = bytes32(r);
-            bytes calldata proof = proofs[i];
-
-            // Copy the same proof into both buffers, paired with its respective scalar.
-            // Memory-safe: writes stay inside the two pre-allocated buffers.
-            assembly ("memory-safe") {
-                let lDst := add(add(lhsInput, 0x20), mul(i, 160))
-                let rDst := add(add(rhsInput, 0x20), mul(i, 160))
-                calldatacopy(lDst, proof.offset, 128)
-                mstore(add(lDst, 128), lScalar)
-                calldatacopy(rDst, proof.offset, 128)
-                mstore(add(rDst, 128), rScalar)
-            }
-        }
-
-        // 3. Append (C, Σr_i) and (G1_gen, -Σr_i·y_i) at the end of the LHS buffer.
-        bytes memory g1Gen = G1_GENERATOR;
-        bytes32 commitmentScalar = bytes32(rSum);
-        bytes32 g1GenScalar = bytes32(ySum == 0 ? 0 : BLS_MODULUS - ySum); // -ySum mod p
-        assembly ("memory-safe") {
-            let cDst := add(add(lhsInput, 0x20), mul(n, 160))
-            calldatacopy(cDst, commitment.offset, 128)
-            mstore(add(cDst, 128), commitmentScalar)
-
-            let gDst := add(add(lhsInput, 0x20), mul(add(n, 1), 160))
-            mcopy(gDst, add(g1Gen, 0x20), 128)
-            mstore(add(gDst, 128), g1GenScalar)
-        }
-
-        // 4. Two MSMs, then the shared pairing tail.
+        // 3. Two MSMs, then the shared pairing tail.
         _pairingCheckOrRevert(Bls12381.g1MsmRaw(lhsInput), Bls12381.g1MsmRaw(rhsInput));
     }
 
@@ -384,52 +343,13 @@ library BlobVerifier {
             _requireProof128(proofs[i]);
         }
 
-        // Build the two MSM inputs in one pass:
-        //   LHS layout: [(C_i, r_i) for i in 0..n]    (slots 0..n)
-        //            || (RHS, z)                       (slot n)
-        //            || (G1_gen, -Σ r_i·y_i)           (slot n+1)
-        //   RHS layout: [(π_i, r_i) for i in 0..n]
-        // Each slot is 128-byte point + 32-byte scalar = 160 bytes.
-        bytes memory lhsInput = new bytes((n + 2) * 160);
-        bytes memory rhsInput = new bytes(n * 160);
-
         bytes32 seed = _challengeSeed128(blobHashes, z, y_coordinates, commitments, proofs);
-        uint256 ySum;
+        (bytes memory lhsInput, bytes memory rhsInput) = _sharedZMsmInputs(seed, z, y_coordinates, commitments, proofs);
 
-        for (uint256 i; i < n; ++i) {
-            uint256 r = _challengeScalar(seed, i, BLS_MODULUS);
-            ySum = addmod(ySum, mulmod(r, uint256(y_coordinates[i]), BLS_MODULUS), BLS_MODULUS);
-
-            bytes32 rScalar = bytes32(r);
-            bytes calldata commitment = commitments[i];
-            bytes calldata proof = proofs[i];
-
-            // LHS commitment slot at i: (C_i, r_i). RHS proof slot at i: (π_i, r_i).
-            assembly ("memory-safe") {
-                let lDst := add(add(lhsInput, 0x20), mul(i, 160))
-                calldatacopy(lDst, commitment.offset, 128)
-                mstore(add(lDst, 128), rScalar)
-
-                let rDst := add(add(rhsInput, 0x20), mul(i, 160))
-                calldatacopy(rDst, proof.offset, 128)
-                mstore(add(rDst, 128), rScalar)
-            }
-        }
-
-        // Compute RHS first; we'll use its result as a single G1 slot in LHS with scalar z.
+        // RHS = Σ r_i·π_i goes into LHS slot n (its scalar z is already in place).
         bytes memory rhs = Bls12381.g1MsmRaw(rhsInput);
-
-        // Append (RHS, z) at slot n and (G1_gen, -Σ r_i·y_i) at slot n+1.
-        bytes memory g1Gen = G1_GENERATOR;
-        bytes32 g1GenScalar = bytes32(ySum == 0 ? 0 : BLS_MODULUS - ySum);
         assembly ("memory-safe") {
-            let rhsSlot := add(add(lhsInput, 0x20), mul(n, 160))
-            mcopy(rhsSlot, add(rhs, 0x20), 128)
-            mstore(add(rhsSlot, 128), z)
-
-            let gSlot := add(add(lhsInput, 0x20), mul(add(n, 1), 160))
-            mcopy(gSlot, add(g1Gen, 0x20), 128)
-            mstore(add(gSlot, 128), g1GenScalar)
+            mcopy(add(add(lhsInput, 0x20), mul(n, 160)), add(rhs, 0x20), 128)
         }
 
         _pairingCheckOrRevert(Bls12381.g1MsmRaw(lhsInput), rhs);
@@ -525,6 +445,113 @@ library BlobVerifier {
         _pairingCheckOrRevert(Bls12381.g1MsmRaw(lhsInput), Bls12381.g1MsmRaw(rhsInput));
     }
 
+    /// @dev MSM inputs for the one-blob shape (shared commitment C), in one pass over the claims:
+    ///        LHS layout: [(π_i, r_i·z_i)   for i in 0..n]   (slots 0..n-1)
+    ///                 || (C, Σ r_i)                         (slot n)
+    ///                 || (G1_gen, -Σ r_i·y_i)               (slot n+1)
+    ///        RHS layout: [(π_i, r_i)       for i in 0..n]
+    ///      Each slot is 128-byte point + 32-byte scalar = 160 bytes. Inputs are already validated.
+    function _sharedCMsmInputs(
+        bytes32 seed,
+        bytes32[] calldata z_coordinates,
+        bytes32[] calldata y_coordinates,
+        bytes calldata commitment,
+        bytes[] calldata proofs
+    ) internal pure returns (bytes memory lhsInput, bytes memory rhsInput) {
+        uint256 n = z_coordinates.length;
+        lhsInput = new bytes((n + 2) * 160);
+        rhsInput = new bytes(n * 160);
+        uint256 rSum;
+        uint256 ySum;
+
+        for (uint256 i; i < n; ++i) {
+            uint256 r = _challengeScalar(seed, i, BLS_MODULUS);
+            rSum = addmod(rSum, r, BLS_MODULUS);
+            ySum = addmod(ySum, mulmod(r, uint256(y_coordinates[i]), BLS_MODULUS), BLS_MODULUS);
+
+            bytes32 lScalar = bytes32(mulmod(r, uint256(z_coordinates[i]), BLS_MODULUS));
+            bytes32 rScalar = bytes32(r);
+            bytes calldata proof = proofs[i];
+
+            // Copy the same proof into both buffers, paired with its respective scalar.
+            // Memory-safe: writes stay inside the two pre-allocated buffers.
+            assembly ("memory-safe") {
+                let lDst := add(add(lhsInput, 0x20), mul(i, 160))
+                let rDst := add(add(rhsInput, 0x20), mul(i, 160))
+                calldatacopy(lDst, proof.offset, 128)
+                mstore(add(lDst, 128), lScalar)
+                calldatacopy(rDst, proof.offset, 128)
+                mstore(add(rDst, 128), rScalar)
+            }
+        }
+
+        // Append (C, Σr_i) and (G1_gen, -Σr_i·y_i) at the end of the LHS buffer.
+        bytes memory g1Gen = G1_GENERATOR;
+        bytes32 commitmentScalar = bytes32(rSum);
+        bytes32 g1GenScalar = bytes32(ySum == 0 ? 0 : BLS_MODULUS - ySum); // -ySum mod p
+        assembly ("memory-safe") {
+            let cDst := add(add(lhsInput, 0x20), mul(n, 160))
+            calldatacopy(cDst, commitment.offset, 128)
+            mstore(add(cDst, 128), commitmentScalar)
+
+            let gDst := add(add(lhsInput, 0x20), mul(add(n, 1), 160))
+            mcopy(gDst, add(g1Gen, 0x20), 128)
+            mstore(add(gDst, 128), g1GenScalar)
+        }
+    }
+
+    /// @dev MSM inputs for the many-blobs shape (shared z), in one pass over the claims:
+    ///        LHS layout: [(C_i, r_i)       for i in 0..n]   (slots 0..n-1)
+    ///                 || (RHS, z)                           (slot n: the caller writes the point
+    ///                                                        once the RHS MSM has run)
+    ///                 || (G1_gen, -Σ r_i·y_i)               (slot n+1)
+    ///        RHS layout: [(π_i, r_i)       for i in 0..n]
+    ///      The shared z factors out of the proof terms: Σ(r_i·z)·π_i = z·RHS, so the LHS needs
+    ///      n+2 slots instead of 2n+1. Inputs are already validated.
+    function _sharedZMsmInputs(
+        bytes32 seed,
+        bytes32 z,
+        bytes32[] calldata y_coordinates,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) internal pure returns (bytes memory lhsInput, bytes memory rhsInput) {
+        uint256 n = y_coordinates.length;
+        lhsInput = new bytes((n + 2) * 160);
+        rhsInput = new bytes(n * 160);
+        uint256 ySum;
+
+        for (uint256 i; i < n; ++i) {
+            uint256 r = _challengeScalar(seed, i, BLS_MODULUS);
+            ySum = addmod(ySum, mulmod(r, uint256(y_coordinates[i]), BLS_MODULUS), BLS_MODULUS);
+
+            bytes32 rScalar = bytes32(r);
+            bytes calldata commitment = commitments[i];
+            bytes calldata proof = proofs[i];
+
+            // LHS commitment slot at i: (C_i, r_i). RHS proof slot at i: (π_i, r_i).
+            assembly ("memory-safe") {
+                let lDst := add(add(lhsInput, 0x20), mul(i, 160))
+                calldatacopy(lDst, commitment.offset, 128)
+                mstore(add(lDst, 128), rScalar)
+
+                let rDst := add(add(rhsInput, 0x20), mul(i, 160))
+                calldatacopy(rDst, proof.offset, 128)
+                mstore(add(rDst, 128), rScalar)
+            }
+        }
+
+        // Scalar z at slot n (its point is written by the caller) and (G1_gen, -Σ r_i·y_i) at n+1.
+        bytes memory g1Gen = G1_GENERATOR;
+        bytes32 g1GenScalar = bytes32(ySum == 0 ? 0 : BLS_MODULUS - ySum);
+        assembly ("memory-safe") {
+            mstore(add(add(add(lhsInput, 0x20), mul(n, 160)), 128), z)
+
+            let gSlot := add(add(lhsInput, 0x20), mul(add(n, 1), 160))
+            mcopy(gSlot, add(g1Gen, 0x20), 128)
+            mstore(add(gSlot, 128), g1GenScalar)
+        }
+    }
+
     /// @dev MSM inputs for the general shape, in one pass over the claims:
     ///        LHS layout: [(C_i, r_i)       for i in 0..n]   (slots 0..n-1)
     ///                 || [(π_i, r_i·z_i)   for i in 0..n]   (slots n..2n-1)
@@ -537,7 +564,7 @@ library BlobVerifier {
         bytes32[] calldata y_coordinates,
         bytes[] calldata commitments,
         bytes[] calldata proofs
-    ) private pure returns (bytes memory lhsInput, bytes memory rhsInput) {
+    ) internal pure returns (bytes memory lhsInput, bytes memory rhsInput) {
         uint256 n = z_coordinates.length;
         lhsInput = new bytes((2 * n + 1) * 160);
         rhsInput = new bytes(n * 160);
@@ -648,7 +675,7 @@ library BlobVerifier {
         bytes32[] calldata ys,
         bytes calldata commitment,
         bytes[] calldata proofs
-    ) private pure returns (bytes32) {
+    ) internal pure returns (bytes32) {
         return keccak256(abi.encode("BlobVerifier.verifyMultiplePoints128", blobHash, zs, ys, commitment, proofs));
     }
 
@@ -659,7 +686,7 @@ library BlobVerifier {
         bytes32[] calldata ys,
         bytes[] calldata commitments,
         bytes[] calldata proofs
-    ) private pure returns (bytes32) {
+    ) internal pure returns (bytes32) {
         return keccak256(
             abi.encode("BlobVerifier.verifySinglePointMultipleBlobs128", blobHashes, z, ys, commitments, proofs)
         );
@@ -674,7 +701,7 @@ library BlobVerifier {
         bytes32[] calldata ys,
         bytes[] calldata commitments,
         bytes[] calldata proofs
-    ) private pure returns (bytes32) {
+    ) internal pure returns (bytes32) {
         return keccak256(
             abi.encode("BlobVerifier.verifyMultiplePointsMultipleBlobs128", blobHashes, zs, ys, commitments, proofs)
         );
@@ -682,7 +709,7 @@ library BlobVerifier {
 
     /// @dev Per-index challenge scalar in [1, p). Clamps the (astronomically rare)
     ///      zero case to 1 so the random combination stays non-degenerate.
-    function _challengeScalar(bytes32 seed, uint256 i, uint256 modulus) private pure returns (uint256 r) {
+    function _challengeScalar(bytes32 seed, uint256 i, uint256 modulus) internal pure returns (uint256 r) {
         r = uint256(keccak256(abi.encode(seed, i))) % modulus;
         if (r == 0) r = 1;
     }

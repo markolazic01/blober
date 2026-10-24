@@ -1,4 +1,4 @@
-.PHONY: build test build-full test-full build-benchmark test-benchmark
+.PHONY: build test build-full test-full build-benchmark test-benchmark symbolic
 
 build:
 	forge build --sizes
@@ -19,3 +19,7 @@ build-benchmark:
 
 test-benchmark:
 	FOUNDRY_PROFILE=benchmark forge test -vvv
+
+# Halmos symbolic proofs (test/symbolic): needs `pip install halmos==0.3.3`
+symbolic:
+	halmos --match-contract SymbolicTest --loop 4 --solver-timeout-assertion 0
