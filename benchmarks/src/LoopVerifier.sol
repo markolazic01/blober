@@ -61,6 +61,33 @@ contract LoopVerifier {
         }
     }
 
+    /// @notice Verify N openings with distinct blobs AND distinct points by looping 0x0A per claim.
+    /// @dev    Baseline for the general shape; identical to `verifyLoop` except z varies per claim.
+    function verifyLoopGeneral(
+        bytes32[] calldata blobHashes,
+        bytes32[] calldata z,
+        bytes32[] calldata y,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) external view {
+        uint256 n = blobHashes.length;
+        if (n != z.length || n != y.length || n != commitments.length || n != proofs.length) {
+            revert ArrayLengthMismatch();
+        }
+
+        for (uint256 i; i < n; ++i) {
+            bytes32 vHash = blobHashes[i];
+            if (vHash[0] != VERSIONED_HASH_VERSION_KZG) revert InvalidBlobHashVersion(vHash[0]);
+            if (commitments[i].length != COMMITMENT_LENGTH) revert InvalidCommitmentLength(commitments[i].length);
+            if (proofs[i].length != PROOF_LENGTH) revert InvalidProofLength(proofs[i].length);
+
+            (bool ok, bytes memory output) =
+                POINT_EVALUATION_PRECOMPILE.staticcall(abi.encodePacked(vHash, z[i], y[i], commitments[i], proofs[i]));
+            if (!ok) revert PrecompileCallFailed();
+            if (keccak256(output) != POINT_EVALUATION_OUTPUT_HASH) revert UnexpectedPrecompileOutput();
+        }
+    }
+
     /// @notice Verify N openings of a single blob (multi-point) by looping 0x0A per opening.
     /// @dev    Same blob commitment + blobHash for every iteration; only z, y, proof vary.
     function verifyLoopMultiPoint(

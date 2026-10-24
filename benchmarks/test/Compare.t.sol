@@ -18,6 +18,16 @@ contract BatchedVerifier {
         BlobVerifier.verifySinglePointMultipleBlobs128(blobHashes, z, y, commitments, proofs);
     }
 
+    function verifyBatchedGeneral(
+        bytes32[] calldata blobHashes,
+        bytes32[] calldata z,
+        bytes32[] calldata y,
+        bytes[] calldata commitments,
+        bytes[] calldata proofs
+    ) external view {
+        BlobVerifier.verifyMultiplePointsMultipleBlobs128(blobHashes, z, y, commitments, proofs);
+    }
+
     function verifyBatchedMultiPoint(
         bytes32 blobHash,
         bytes32[] calldata z,
@@ -33,6 +43,9 @@ contract BatchedVerifier {
 ///         EIP-2537 batched verifiers. Two scenarios:
 ///           - many blobs, one shared z (verifySinglePointMultipleBlobs128)
 ///           - one blob, many distinct z   (verifyMultiplePoints128)
+///           - many blobs, one z each      (verifyMultiplePointsMultipleBlobs128, general shape)
+///         The general-shape scenario reuses the multi-blob fixture with z passed per claim:
+///         gas does not depend on scalar values, so equal z's measure the same as distinct ones.
 contract Compare is Test {
     LoopVerifier loopVerifier;
     BatchedVerifier batchedVerifier;
@@ -114,6 +127,45 @@ contract Compare is Test {
 
         uint256 g2 = gasleft();
         batchedVerifier.verifyBatchedMultiBlob(blobHashes, mbZ, ys, comm128, proof128);
+        gasBatched = g2 - gasleft();
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    //  General shape: many blobs, one z each (verifyMultiplePointsMultipleBlobs128)
+    // ────────────────────────────────────────────────────────────────────
+
+    function test_compare_gas_multi_blob_multi_point() public {
+        string memory csv = "n,gas_loop,gas_batched,batched_pct_of_loop,saved_pct\n";
+
+        console2.log("=== General shape: many blobs, many points ===");
+        for (uint256 i; i < SWEEP.length; ++i) {
+            (uint256 gasLoop, uint256 gasBatched) = _measureGeneral(SWEEP[i]);
+            _logRow(SWEEP[i], gasLoop, gasBatched);
+            csv = _appendRow(csv, SWEEP[i], gasLoop, gasBatched);
+        }
+
+        vm.writeFile("benchmarks/data/synthetic_gas_multi_blob_multi_point.csv", csv);
+        console2.log("Wrote data/synthetic_gas_multi_blob_multi_point.csv");
+    }
+
+    function _measureGeneral(uint256 n) internal view returns (uint256 gasLoop, uint256 gasBatched) {
+        bytes32[] memory blobHashes = _sliceBytes32(mbBlobHashes, n);
+        bytes32[] memory ys = _sliceBytes32(mbY, n);
+        bytes[] memory comm48 = _sliceBytes(mbCommitmentsCompressed, n);
+        bytes[] memory proof48 = _sliceBytes(mbProofsCompressed, n);
+        bytes[] memory comm128 = _sliceBytes(mbCommitmentsUncompressed, n);
+        bytes[] memory proof128 = _sliceBytes(mbProofsUncompressed, n);
+        bytes32[] memory zs = new bytes32[](n);
+        for (uint256 i; i < n; ++i) {
+            zs[i] = mbZ;
+        }
+
+        uint256 g1 = gasleft();
+        loopVerifier.verifyLoopGeneral(blobHashes, zs, ys, comm48, proof48);
+        gasLoop = g1 - gasleft();
+
+        uint256 g2 = gasleft();
+        batchedVerifier.verifyBatchedGeneral(blobHashes, zs, ys, comm128, proof128);
         gasBatched = g2 - gasleft();
     }
 
