@@ -15,10 +15,16 @@ import matplotlib.ticker as mtick
 from matplotlib.offsetbox import AnnotationBbox, HPacker, TextArea
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
-LOOP_COLOR = "#d62728"
-BATCHED_COLOR = "#2ca02c"
-MULTI_BLOB_COLOR = "#1f77b4"
-MULTI_POINT_COLOR = "#c44569"
+# Categorical slots 1-3 (blue, orange, aqua): validated colorblind-safe as a set. Markers and
+# direct labels carry identity too, so no series relies on color alone.
+LOOP_COLOR = "#eb6834"
+BATCHED_COLOR = "#2a78d6"
+MULTI_BLOB_COLOR = "#2a78d6"
+MULTI_POINT_COLOR = "#eb6834"
+GENERAL_COLOR = "#1baf7a"
+# Reference lines (crossover, today's N) are annotations, not series: neutral ink.
+REF_COLOR = "#555555"
+REF_TEXT = "#333333"
 N_LIMIT = 100
 
 # Baseline display order + labels (matches reference_replay.json keys)
@@ -71,18 +77,18 @@ def plot_curves(rows: list[dict], title: str, subtitle: str, out_path: Path) -> 
     if crossover_row is not None:
         crossover_n = crossover_row["n"]
         crossover_saved = crossover_row["saved_pct"]
-        ax.axvline(crossover_n, color="#ff7f0e", linestyle="--",
+        ax.axvline(crossover_n, color=REF_COLOR, linestyle="--",
                    linewidth=2.2, alpha=0.95, zorder=2)
         ax.annotate(
             f"crossover\nN={crossover_n}  ·  (-{crossover_saved}%)",
             xy=(crossover_n, max(loop) * 0.45),
             xytext=(crossover_n + 4, max(loop) * 0.5),
-            fontsize=10, color="#cc5e00", fontweight="700",
-            arrowprops=dict(arrowstyle="-", color="#ff7f0e", lw=1.2),
+            fontsize=10, color=REF_TEXT, fontweight="700",
+            arrowprops=dict(arrowstyle="-", color=REF_COLOR, lw=1.2),
         )
 
     # Strategic intermediate-point labels: gas values + savings %
-    label_ns = {10, 25, 50}
+    label_ns = {25, 50}
     for r in rows:
         if r["n"] in label_ns:
             ax.annotate(fmt_gas(r["gas_loop"]),
@@ -124,7 +130,7 @@ def plot_curves(rows: list[dict], title: str, subtitle: str, out_path: Path) -> 
     print(f"wrote {out_path.relative_to(DATA_DIR.parent.parent)}")
 
 
-def plot_savings(multi_blob: list[dict], multi_point: list[dict], out_path: Path) -> None:
+def plot_savings(multi_blob: list[dict], multi_point: list[dict], general: list[dict], out_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(9, 5.2), dpi=130)
 
     ns_mb = [r["n"] for r in multi_blob]
@@ -146,28 +152,12 @@ def plot_savings(multi_blob: list[dict], multi_point: list[dict], out_path: Path
     ax.plot(ns_mp, saved_mp, color=MULTI_POINT_COLOR, marker="s", linewidth=2.2,
             label="multi-point, one blob (verifyMultiplePoints128)",
             markevery=mp_marker_idxs)
+    ns_g = [r["n"] for r in general]
+    ax.plot(ns_g, [r["saved_pct"] for r in general], color=GENERAL_COLOR, marker="^", linewidth=2.2,
+            label="general, one z per blob (verifyMultiplePointsMultipleBlobs128)",
+            markevery=[i for i, n in enumerate(ns_g) if n >= 5 or n in sub_crossover_keep])
 
     ax.axhline(0, color="#666", linewidth=0.8)
-    ax.axvline(5, color="#ff7f0e", linestyle="--", linewidth=2.2, alpha=0.95)
-    crossover_mb = next((r["saved_pct"] for r in multi_blob if r["n"] == 5), None)
-    crossover_mp = next((r["saved_pct"] for r in multi_point if r["n"] == 5), None)
-    if crossover_mb is not None and crossover_mp is not None:
-        # Each percentage uses its line's color — orange for the framing text.
-        text_props = dict(fontsize=10, fontweight="700")
-        orange = "#cc5e00"
-        parts = [
-            TextArea("crossover  N=5  ·  ", textprops={**text_props, "color": orange}),
-            TextArea(f"{crossover_mb}%", textprops={**text_props, "color": MULTI_BLOB_COLOR}),
-            TextArea(" / ", textprops={**text_props, "color": orange}),
-            TextArea(f"{crossover_mp}%", textprops={**text_props, "color": MULTI_POINT_COLOR}),
-        ]
-        hbox = HPacker(children=parts, align="center", pad=0, sep=0)
-        ab = AnnotationBbox(hbox, xy=(7, 68), xycoords="data",
-                            box_alignment=(0, 0.5), frameon=False, pad=0)
-        ax.add_artist(ab)
-    else:
-        ax.annotate("crossover  N=5", xy=(5, 70), xytext=(7, 68),
-                    fontsize=10, color="#cc5e00", fontweight="700")
     ax.axvline(6, color="#888", linestyle=":", linewidth=1, alpha=0.5)
     ax.annotate("N=6 (today)", xy=(6, 5), xytext=(7, 3),
                 fontsize=9, color="#555")
@@ -176,7 +166,7 @@ def plot_savings(multi_blob: list[dict], multi_point: list[dict], out_path: Path
     # series don't compete for the same vertical space. The two lines run
     # within a few percentage points of each other, so we annotate
     # alternate Ns rather than both lines at every N.
-    blob_label_ns = {10, 50}
+    blob_label_ns = {50}
     point_label_ns = {25}
     for r in multi_blob:
         if r["n"] in blob_label_ns:
@@ -195,6 +185,10 @@ def plot_savings(multi_blob: list[dict], multi_point: list[dict], out_path: Path
 
     last_mb = multi_blob[-1]
     last_mp = multi_point[-1]
+    last_g = general[-1]
+    ax.annotate(f"{last_g['saved_pct']}%", xy=(last_g["n"], last_g["saved_pct"]),
+                xytext=(6, 0), textcoords="offset points",
+                fontsize=10, color=REF_TEXT, fontweight="bold", va="center")
     ax.annotate(f"{last_mb['saved_pct']}%", xy=(last_mb["n"], last_mb["saved_pct"]),
                 xytext=(6, 0), textcoords="offset points",
                 fontsize=10, color=MULTI_BLOB_COLOR, fontweight="bold", va="center")
@@ -213,7 +207,7 @@ def plot_savings(multi_blob: list[dict], multi_point: list[dict], out_path: Path
     ax.legend(loc="lower right", frameon=False, fontsize=10)
     ax.set_title("Gas savings vs. batch size", fontsize=14, fontweight="600",
                  loc="left", pad=18)
-    ax.text(0, 1.02, "Negative below the crossover (threshold fallback overhead, ≤3% in absolute terms)",
+    ax.text(0, 1.02, "vs. a bare 48-byte 0x0A loop. Below N≈5 Blober runs its own 0x0A fallback and pays to validate 128-byte points",
             transform=ax.transAxes, fontsize=10, color="#555")
 
     fig.tight_layout()
@@ -269,8 +263,8 @@ def plot_eth_saved_today(cm: dict, out_path: Path) -> None:
     ax.set_title("ETH/yr left on the table at today's batch size (N=6)",
                  fontsize=14, fontweight="600", loc="left", pad=18)
     ax.text(0, 1.02,
-            "Per-rollup annualized savings — 4,102 real txs over 90 days "
-            "≈ 16,706 txs/yr, priced at historical Ethereum gas baselines",
+            "Per-rollup annualized savings — 4,096 real txs over 90 days "
+            "≈ 16,700 txs/yr, priced at historical Ethereum gas baselines",
             transform=ax.transAxes, fontsize=10, color="#555")
 
     fig.tight_layout()
@@ -296,16 +290,17 @@ def plot_eth_saved_scaling(cm: dict, out_path: Path) -> None:
     # Label every measured point with its ETH/yr value
     for n, y in zip(ns, ys):
         fmt = f"{y:.2f} ETH" if y < 10 else f"{y:.1f} ETH"
-        # Slight upward offset; smaller font for crowded low-N region
-        offset = (0, 11)
+        # Above the point, except either side of the "today" line where N=5 and N=6 crowd it
+        offset, ha = {5: ((-10, 0), "right"), 6: ((10, -2), "left")}.get(n, ((0, 11), "center"))
         ax.annotate(fmt, xy=(n, y), xytext=offset, textcoords="offset points",
-                    ha="center", fontsize=10, color=line_color, fontweight="600")
+                    ha=ha, va="center" if n in (5, 6) else "baseline",
+                    fontsize=10, color=line_color, fontweight="600")
 
     # Today marker
-    ax.axvline(6, color="#ff7f0e", linestyle="--", linewidth=2.2, alpha=0.95)
+    ax.axvline(6, color=REF_COLOR, linestyle="--", linewidth=2.2, alpha=0.95)
     ax.annotate("today (N=6)", xy=(6, max(ys) * 0.4),
                 xytext=(9, 0), textcoords="offset points",
-                fontsize=10, color="#cc5e00", va="center", fontweight="700")
+                fontsize=10, color=REF_TEXT, va="center", fontweight="700")
 
     ax.set_yscale("log")
     ax.set_xlim(0, 110)
@@ -327,12 +322,63 @@ def plot_eth_saved_scaling(cm: dict, out_path: Path) -> None:
     print(f"wrote {out_path.relative_to(DATA_DIR.parent.parent)}")
 
 
+def plot_threshold(out_path: Path) -> None:
+    """Small multiples: Blober's validated 0x0A fallback vs its batched path, per shape.
+
+    The first N where batched is cheaper is the shape's dispatch threshold.
+    """
+    with (DATA_DIR / "threshold_crossover.csv").open() as f:
+        rows = list(csv.DictReader(f))
+    shapes = [
+        ("shared_z", "Many blobs, one z", "BATCH_THRESHOLD_128"),
+        ("one_blob", "One blob, many z", "BATCH_THRESHOLD_128"),
+        ("general", "Many blobs, one z each", "BATCH_THRESHOLD_GENERAL_128"),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.4), dpi=130, sharey=True)
+    for ax, (key, title, const) in zip(axes, shapes):
+        rs = [r for r in rows if r["shape"] == key]
+        ns = [int(r["n"]) for r in rs]
+        fb = [int(r["gas_fallback"]) for r in rs]
+        bt = [int(r["gas_batched"]) for r in rs]
+        ax.plot(ns, fb, color=LOOP_COLOR, marker="o", markersize=7, linewidth=2, label="0x0A fallback")
+        ax.plot(ns, bt, color=BATCHED_COLOR, marker="s", markersize=7, linewidth=2, label="batched (0x0C + 0x0F)")
+        threshold = next(n for n, a, b in zip(ns, fb, bt) if b < a)
+        ax.axvspan(threshold - 0.5, max(ns) + 0.5, color="#2a78d6", alpha=0.06, lw=0)
+        ax.axvline(threshold - 0.5, color=REF_COLOR, linestyle="--", linewidth=1.4)
+        ax.annotate(f"{const}\n= {threshold}", xy=(threshold - 0.5, 0.0), xycoords=("data", "axes fraction"),
+                    xytext=(6, 10), textcoords="offset points", fontsize=9, color=REF_TEXT, fontweight="600")
+        ax.annotate(fmt_gas(fb[-1]), xy=(ns[-1], fb[-1]), xytext=(6, 0), textcoords="offset points",
+                    fontsize=9.5, color=REF_TEXT, va="center")
+        ax.annotate(fmt_gas(bt[-1]), xy=(ns[-1], bt[-1]), xytext=(6, 0), textcoords="offset points",
+                    fontsize=9.5, color=REF_TEXT, va="center")
+        ax.set_title(title, fontsize=12, fontweight="600", loc="left")
+        ax.set_xlabel("N (claims)", fontsize=10)
+        ax.set_xticks(ns)
+        ax.set_xlim(min(ns) - 0.5, max(ns) + 1.2)
+        ax.grid(True, linestyle="-", linewidth=0.5, alpha=0.3)
+        ax.set_axisbelow(True)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+    axes[0].set_ylabel("gas used", fontsize=10)
+    axes[0].yaxis.set_major_formatter(mtick.FuncFormatter(lambda v, _: f"{v/1e3:.0f}K"))
+    axes[0].legend(loc="upper left", frameon=False, fontsize=9.5, bbox_to_anchor=(0, 0.92))
+    fig.suptitle("Where the dispatch thresholds come from", x=0.01, ha="left", fontsize=14, fontweight="600")
+    fig.text(0.01, 0.905, "Blober's own two paths on identical 128-byte inputs; batching wins from the shaded region on",
+             fontsize=10, color="#555")
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    fig.savefig(out_path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {out_path.relative_to(DATA_DIR.parent.parent)}")
+
+
 def main() -> None:
     multi_blob_all = load_csv(DATA_DIR / "synthetic_gas_multi_blob_one_point.csv")
     multi_point_all = load_csv(DATA_DIR / "synthetic_gas_multi_point_one_blob.csv")
+    general_all = load_csv(DATA_DIR / "synthetic_gas_multi_blob_multi_point.csv")
 
     multi_blob = filter_to_limit(multi_blob_all, N_LIMIT)
     multi_point = filter_to_limit(multi_point_all, N_LIMIT)
+    general = filter_to_limit(general_all, N_LIMIT)
 
     plot_curves(
         multi_blob,
@@ -349,8 +395,11 @@ def main() -> None:
     plot_savings(
         multi_blob,
         multi_point,
+        general,
         out_path=DATA_DIR / "chart_savings.png",
     )
+
+    plot_threshold(DATA_DIR / "chart_threshold.png")
 
     cm = load_cost_matrix()
     plot_eth_saved_today(cm, DATA_DIR / "chart_eth_saved_today.png")

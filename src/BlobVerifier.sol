@@ -50,7 +50,7 @@ library BlobVerifier {
     ///      overhead (two G1MSMs + one pairing) only pays off above this crossover. Measured
     ///      against the fallback as implemented, including its encoding and on-curve checks: at
     ///      n = 4 the batched path is ~2% cheaper for the shared-z and shared-C shapes, and ~18%
-    ///      dearer at n = 3.
+    ///      dearer at n = 3 (`test_threshold_crossover` in benchmarks/test/Compare.t.sol).
     uint256 internal constant BATCH_THRESHOLD_128 = 4;
 
     /// @dev Crossover for the general shape (distinct commitments and distinct evaluation points).
