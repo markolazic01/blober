@@ -39,6 +39,61 @@ contract BatchedVerifier {
     }
 }
 
+/// @dev Exposes both halves of each 128-byte verifier, bypassing the threshold dispatch, so the
+///      threshold benchmark can measure Blober's own fallback against its own batched path.
+contract PathHarness {
+    function sharedZLoop(bytes32[] calldata h, bytes32 z, bytes32[] calldata y, bytes[] calldata c, bytes[] calldata p)
+        external
+        view
+    {
+        BlobVerifier._verifySinglePointMultipleBlobs128Loop(h, z, y, c, p);
+    }
+
+    function sharedZBatched(
+        bytes32[] calldata h,
+        bytes32 z,
+        bytes32[] calldata y,
+        bytes[] calldata c,
+        bytes[] calldata p
+    ) external view {
+        BlobVerifier._verifySinglePointMultipleBlobs128Batched(h, z, y, c, p);
+    }
+
+    function oneBlobLoop(bytes32 h, bytes32[] calldata z, bytes32[] calldata y, bytes calldata c, bytes[] calldata p)
+        external
+        view
+    {
+        BlobVerifier._verifyMultiplePoints128Loop(h, z, y, c, p);
+    }
+
+    function oneBlobBatched(bytes32 h, bytes32[] calldata z, bytes32[] calldata y, bytes calldata c, bytes[] calldata p)
+        external
+        view
+    {
+        BlobVerifier._verifyMultiplePoints128Batched(h, z, y, c, p);
+    }
+
+    function generalLoop(
+        bytes32[] calldata h,
+        bytes32[] calldata z,
+        bytes32[] calldata y,
+        bytes[] calldata c,
+        bytes[] calldata p
+    ) external view {
+        BlobVerifier._verifyMultiplePointsMultipleBlobs128Loop(h, z, y, c, p);
+    }
+
+    function generalBatched(
+        bytes32[] calldata h,
+        bytes32[] calldata z,
+        bytes32[] calldata y,
+        bytes[] calldata c,
+        bytes[] calldata p
+    ) external view {
+        BlobVerifier._verifyMultiplePointsMultipleBlobs128Batched(h, z, y, c, p);
+    }
+}
+
 /// @notice Side-by-side gas comparison: industry-standard 0x0A loop vs. our
 ///         EIP-2537 batched verifiers. Two scenarios:
 ///           - many blobs, one shared z (verifySinglePointMultipleBlobs128)
@@ -49,6 +104,7 @@ contract BatchedVerifier {
 contract Compare is Test {
     LoopVerifier loopVerifier;
     BatchedVerifier batchedVerifier;
+    PathHarness paths;
 
     // ── Multi-blob fixture (one shared z) ───────────────────────────────
     bytes32 mbZ;
@@ -73,6 +129,7 @@ contract Compare is Test {
     function setUp() public {
         loopVerifier = new LoopVerifier();
         batchedVerifier = new BatchedVerifier();
+        paths = new PathHarness();
 
         // Multi-blob fixture
         string memory mb = vm.readFile("benchmarks/data/fixtures_multi_blob.json");
@@ -200,6 +257,64 @@ contract Compare is Test {
         uint256 g2 = gasleft();
         batchedVerifier.verifyBatchedMultiPoint(mpBlobHash, zs, ys, mpCommitmentUncompressed, proof128);
         gasBatched = g2 - gasleft();
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    //  Threshold: Blober's own 0x0A fallback vs its batched path
+    // ────────────────────────────────────────────────────────────────────
+
+    /// @notice Where `BATCH_THRESHOLD_128` / `BATCH_THRESHOLD_GENERAL_128` come from: the smallest N at
+    ///         which the batched path beats the validated 128-byte fallback for each shape.
+    function test_threshold_crossover() public {
+        string memory csv = "n,shape,gas_fallback,gas_batched\n";
+        for (uint256 n = 2; n <= 8; ++n) {
+            bytes32[] memory h = _sliceBytes32(mbBlobHashes, n);
+            bytes32[] memory y = _sliceBytes32(mbY, n);
+            bytes[] memory c = _sliceBytes(mbCommitmentsUncompressed, n);
+            bytes[] memory p = _sliceBytes(mbProofsUncompressed, n);
+            bytes32[] memory zs = new bytes32[](n);
+            for (uint256 i; i < n; ++i) {
+                zs[i] = mbZ;
+            }
+            bytes32[] memory mz = _sliceBytes32(mpZ, n);
+            bytes32[] memory my = _sliceBytes32(mpY, n);
+            bytes[] memory mp = _sliceBytes(mpProofsUncompressed, n);
+
+            uint256 g = gasleft();
+            paths.sharedZLoop(h, mbZ, y, c, p);
+            uint256 loopGas = g - gasleft();
+            g = gasleft();
+            paths.sharedZBatched(h, mbZ, y, c, p);
+            csv = _appendThresholdRow(csv, n, "shared_z", loopGas, g - gasleft());
+
+            g = gasleft();
+            paths.oneBlobLoop(mpBlobHash, mz, my, mpCommitmentUncompressed, mp);
+            loopGas = g - gasleft();
+            g = gasleft();
+            paths.oneBlobBatched(mpBlobHash, mz, my, mpCommitmentUncompressed, mp);
+            csv = _appendThresholdRow(csv, n, "one_blob", loopGas, g - gasleft());
+
+            g = gasleft();
+            paths.generalLoop(h, zs, y, c, p);
+            loopGas = g - gasleft();
+            g = gasleft();
+            paths.generalBatched(h, zs, y, c, p);
+            csv = _appendThresholdRow(csv, n, "general", loopGas, g - gasleft());
+        }
+        vm.writeFile("benchmarks/data/threshold_crossover.csv", csv);
+        console2.log("Wrote data/threshold_crossover.csv");
+    }
+
+    function _appendThresholdRow(
+        string memory csv,
+        uint256 n,
+        string memory shape,
+        uint256 gasFallback,
+        uint256 gasBatched
+    ) internal pure returns (string memory) {
+        return string.concat(
+            csv, vm.toString(n), ",", shape, ",", vm.toString(gasFallback), ",", vm.toString(gasBatched), "\n"
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────

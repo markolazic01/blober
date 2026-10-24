@@ -40,6 +40,10 @@ const RPC_URL = process.env.ETH_RPC_URL ?? "https://ethereum-rpc.publicnode.com"
 const WINDOW_DAYS = Number.parseInt(process.env.WINDOW_DAYS ?? "90", 10);
 const MAX_SAMPLE = Number.parseInt(process.env.MAX_SAMPLE ?? "5000", 10);
 const RPC_CONCURRENCY = Number.parseInt(process.env.RPC_CONCURRENCY ?? "10", 10);
+// REPRICE=1 skips Blockscout and the RPC: it re-prices the txs already saved in OUT_PATH against
+// the current synthetic_gas_*.csv curves, so a verifier change updates the numbers without
+// moving the sample window.
+const REPRICE = process.env.REPRICE === "1";
 
 const HASHES_FILE = process.env.TX_HASHES_FILE ?? join(__dirname, "tx_hashes.txt");
 const BENCHMARK_MULTI_BLOB_CSV = join(__dirname, "..", "data", "synthetic_gas_multi_blob_one_point.csv");
@@ -210,8 +214,10 @@ async function main() {
     // is shown alongside as a separate use-case projection.
     const samples = samplesMultiBlob;
 
-    let hashes: string[];
-    if (existsSync(HASHES_FILE) && process.env.TX_HASHES_FILE) {
+    let hashes: string[] = [];
+    if (REPRICE) {
+        console.log(`REPRICE: re-pricing the txs already in ${OUT_PATH} against the current gas curves`);
+    } else if (existsSync(HASHES_FILE) && process.env.TX_HASHES_FILE) {
         hashes = readHashesFromFile();
         console.log(`Loaded ${hashes.length} tx hashes from ${HASHES_FILE}`);
     } else {
@@ -232,7 +238,42 @@ async function main() {
         savedEth: number;
     };
 
+    const priceRow = (
+        hash: string,
+        tx: { blockNumber: number; nBlobs: number; gasUsed: number; gasPriceWei: bigint },
+    ): Row => {
+        const referenceLoopGas = interp(samples, tx.nBlobs, "gasLoop");
+        const hypotheticalBatchedGas = interp(samples, tx.nBlobs, "gasBatched");
+        const savedGas = referenceLoopGas - hypotheticalBatchedGas;
+        // savedGas (units) × gasPrice (wei) / 1e18 → ETH
+        const savedEth = Number(BigInt(savedGas) * tx.gasPriceWei) / 1e18;
+        return {
+            hash,
+            blockNumber: tx.blockNumber,
+            nBlobs: tx.nBlobs,
+            actualGasUsed: tx.gasUsed,
+            gasPriceGwei: Number(tx.gasPriceWei) / 1e9,
+            referenceLoopGas,
+            hypotheticalBatchedGas,
+            savedGas,
+            savedEth,
+        };
+    };
+
     const rows: Row[] = [];
+    if (REPRICE) {
+        const previous: { txs: Row[] } = JSON.parse(readFileSync(OUT_PATH, "utf8"));
+        for (const r of previous.txs) {
+            rows.push(
+                priceRow(r.hash, {
+                    blockNumber: r.blockNumber,
+                    nBlobs: r.nBlobs,
+                    gasUsed: r.actualGasUsed,
+                    gasPriceWei: BigInt(Math.round(r.gasPriceGwei * 1e9)),
+                }),
+            );
+        }
+    }
     let failures = 0;
     let skipped = 0;
     console.log(`Fetching tx details via RPC (concurrency=${RPC_CONCURRENCY})...`);
@@ -254,23 +295,7 @@ async function main() {
                 skipped++;
                 continue;
             }
-            const referenceLoopGas = interp(samples, tx.nBlobs, "gasLoop");
-            const hypotheticalBatchedGas = interp(samples, tx.nBlobs, "gasBatched");
-            const savedGas = referenceLoopGas - hypotheticalBatchedGas;
-            // savedGas (units) × gasPrice (wei) / 1e18 → ETH
-            const savedEth = Number(BigInt(savedGas) * tx.gasPriceWei) / 1e18;
-
-            rows.push({
-                hash: h,
-                blockNumber: tx.blockNumber,
-                nBlobs: tx.nBlobs,
-                actualGasUsed: tx.gasUsed,
-                gasPriceGwei: Number(tx.gasPriceWei) / 1e9,
-                referenceLoopGas,
-                hypotheticalBatchedGas,
-                savedGas,
-                savedEth,
-            });
+            rows.push(priceRow(h, tx));
         }
 
         const done = Math.min(i + RPC_CONCURRENCY, hashes.length);
