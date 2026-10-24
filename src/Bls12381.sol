@@ -19,6 +19,19 @@ library Bls12381 {
     address internal constant PAIRING_PRECOMPILE = address(0x0F);
 
     // ──────────────────────────────────────────────────────────────────────
+    //  Gas caps (EIP-2537 prices)
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// @dev EIP-2537 precompiles burn all gas they are given when they reject an input. Each call
+    ///      below forwards at most the precompile's own price (the undiscounted per-point price for
+    ///      MSM), so a malformed point costs the caller that much rather than 63/64 of the frame.
+    ///      A future repricing upward would require raising these caps.
+    uint256 internal constant G1ADD_GAS = 375;
+    uint256 internal constant G1MSM_GAS_PER_POINT = 12000;
+    uint256 internal constant PAIRING_GAS_PER_PAIR = 32600;
+    uint256 internal constant PAIRING_GAS_BASE = 37700;
+
+    // ──────────────────────────────────────────────────────────────────────
     //  Sizes
     // ──────────────────────────────────────────────────────────────────────
 
@@ -36,6 +49,8 @@ library Bls12381 {
     error InvalidG2PointLength(uint256 actual);
     error PrecompileCallFailed(address precompile);
     error UnexpectedPrecompileOutput(address precompile);
+    error NonCanonicalG1Point();
+    error G1PointNotOnCurve();
 
     // ──────────────────────────────────────────────────────────────────────
     //  Operations
@@ -45,6 +60,9 @@ library Bls12381 {
     /// @dev Calls the BLS12_G1ADD precompile (0x0B). Cheaper than `g1Msm` with
     ///      scalars [1, 1] and reads more clearly when you just need to compose
     ///      two G1 points (e.g., subtraction via add-with-negated-point).
+    ///      WARNING: G1ADD performs no subgroup check (EIP-2537). Never pass
+    ///      untrusted points through it; route them through `g1Msm`/`pairingCheck`,
+    ///      which do check subgroup membership.
     /// @param a 128-byte G1 point.
     /// @param b 128-byte G1 point.
     /// @return One G1 point (128 bytes) — the sum a + b.
@@ -52,7 +70,7 @@ library Bls12381 {
         _requireG1Length(a);
         _requireG1Length(b);
         // Fixed 256-byte input — no loop, no allocation tuning needed.
-        return _staticcall(G1ADD_PRECOMPILE, abi.encodePacked(a, b), G1_POINT_SIZE);
+        return _staticcall(G1ADD_PRECOMPILE, abi.encodePacked(a, b), G1_POINT_SIZE, G1ADD_GAS);
     }
 
     /// @notice Multi-scalar multiplication on G1: returns Σ scalars[i] * points[i].
@@ -101,7 +119,7 @@ library Bls12381 {
     /// @return One G1 point (128 bytes) — the resulting sum.
     function g1MsmRaw(bytes memory input) internal view returns (bytes memory) {
         if (input.length == 0 || input.length % 160 != 0) revert EmptyInput();
-        return _staticcall(G1MSM_PRECOMPILE, input, G1_POINT_SIZE);
+        return _staticcall(G1MSM_PRECOMPILE, input, G1_POINT_SIZE, input.length * G1MSM_GAS_PER_POINT / 160);
     }
 
     /// @notice Convert a 128-byte EIP-2537 uncompressed G1 point to its 48-byte
@@ -165,8 +183,44 @@ library Bls12381 {
             }
         }
 
-        bytes memory output = _staticcall(PAIRING_PRECOMPILE, input, PAIRING_OUTPUT_SIZE);
+        bytes memory output =
+            _staticcall(PAIRING_PRECOMPILE, input, PAIRING_OUTPUT_SIZE, n * PAIRING_GAS_PER_PAIR + PAIRING_GAS_BASE);
         return abi.decode(output, (uint256)) == 1;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    //  Input validation (calldata, 128-byte EIP-2537 encoding)
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// @notice Revert unless `point` is a canonical EIP-2537 G1 encoding: both 16-byte paddings
+    ///         zero and both coordinates < p. Length must already be checked (128 bytes).
+    /// @dev    These are the format checks the precompiles would otherwise perform after burning
+    ///         their gas. On-curve and subgroup membership are not checked here.
+    function requireCanonical(bytes calldata point) internal pure {
+        (uint256 xHi, uint256 xLo, uint256 yHi, uint256 yLo, bool padded) = _words(point);
+        if (padded || !_ltP(xHi, xLo) || !_ltP(yHi, yLo)) revert NonCanonicalG1Point();
+    }
+
+    /// @notice Revert unless `point` is the point at infinity or satisfies y² = x³ + 4 over Fp.
+    /// @dev    Adds the point to infinity with G1ADD, which checks the curve equation but not subgroup
+    ///         membership (EIP-2537), for ~700 gas. Needed wherever a 128-byte point is compressed
+    ///         without going through an EIP-2537 precompile: compression reads only x and the sign of
+    ///         y, so an off-curve y would otherwise go unnoticed. Subgroup membership is then checked
+    ///         by 0x0A when it decompresses. A rejected point costs `G1ADD_GAS`.
+    function requireOnCurve(bytes calldata point) internal view {
+        bool ok;
+        // Input: point || 128 zero bytes (infinity), written as scratch past the free memory
+        // pointer and never allocated; the output overwrites the point.
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            calldatacopy(ptr, point.offset, 0x80)
+            mstore(add(ptr, 0x80), 0)
+            mstore(add(ptr, 0xa0), 0)
+            mstore(add(ptr, 0xc0), 0)
+            mstore(add(ptr, 0xe0), 0)
+            ok := staticcall(G1ADD_GAS, 0x0b, ptr, 0x100, ptr, 0x80) // G1ADD_PRECOMPILE
+        }
+        if (!ok) revert G1PointNotOnCurve();
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -178,15 +232,44 @@ library Bls12381 {
     uint256 private constant P_HALF_HI = 0x0D0088F51CBFF34D258DD3DB21A5D66B;
     uint256 private constant P_HALF_LO = 0xB23BA5C279C2895FB39869507B587B120F55FFFF58A9FFFFDCFF7FFFFFFFD555;
 
-    function _staticcall(address precompile, bytes memory input, uint256 expectedOutputLength)
+    /// @dev p itself, split the same way (16-byte high half, 32-byte low half).
+    uint256 private constant P_HI = 0x1A0111EA397FE69A4B1BA7B6434BACD7;
+    uint256 private constant P_LO = 0x64774B84F38512BF6730D2A0F6B0F6241EABFFFEB153FFFFB9FEFFFFFFFFAAAB;
+
+    function _staticcall(address precompile, bytes memory input, uint256 expectedOutputLength, uint256 gasLimit)
         private
         view
         returns (bytes memory output)
     {
         bool ok;
-        (ok, output) = precompile.staticcall(input);
+        (ok, output) = precompile.staticcall{gas: gasLimit}(input);
         if (!ok) revert PrecompileCallFailed(precompile);
         if (output.length != expectedOutputLength) revert UnexpectedPrecompileOutput(precompile);
+    }
+
+    /// @dev Split a 128-byte calldata point into its coordinates' 16-byte high and 32-byte low
+    ///      halves; `padded` is true if either 16-byte zero padding holds a non-zero byte.
+    function _words(bytes calldata point)
+        private
+        pure
+        returns (uint256 xHi, uint256 xLo, uint256 yHi, uint256 yLo, bool padded)
+    {
+        uint256 w0;
+        uint256 w2;
+        assembly ("memory-safe") {
+            w0 := calldataload(point.offset) // 16 pad || x[0..16]
+            xLo := calldataload(add(point.offset, 0x20)) // x[16..48]
+            w2 := calldataload(add(point.offset, 0x40)) // 16 pad || y[0..16]
+            yLo := calldataload(add(point.offset, 0x60)) // y[16..48]
+        }
+        xHi = w0 & type(uint128).max;
+        yHi = w2 & type(uint128).max;
+        padded = (w0 >> 128) | (w2 >> 128) != 0;
+    }
+
+    /// @dev (hi, lo) < p, comparing the 16-byte high halves first.
+    function _ltP(uint256 hi, uint256 lo) private pure returns (bool) {
+        return hi < P_HI || (hi == P_HI && lo < P_LO);
     }
 
     function _requireG1Length(bytes memory point) private pure {
