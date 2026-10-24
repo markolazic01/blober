@@ -54,6 +54,7 @@ The batched verifiers are sound if every link below holds. Each link is either m
 | The challenge code matches its spec | Halmos: `test/symbolic/Challenge.t.sol` |
 | Every MSM buffer slot holds exactly the point and scalar of the equation above (all three shapes, n = 1–3) | Halmos: `test/symbolic/MsmInputs.t.sol` |
 | `requireCanonical` and `compress` match the EIP-2537 / ZCash encoding specs for every 128-byte input | Halmos: `test/symbolic/Encoding.t.sol` |
+| The hard-coded G₁, −G₂ and [τ]₂ are the EIP-4844 trusted setup's | Tested: `test/TrustedSetupConstants.t.sol` (byte match against the pinned ceremony file, plus pairing checks tying [τ]₂ to the setup's [τ]₁) |
 | The 0x0A fallback and the batched path accept exactly the same inputs | Fuzzed: `test/PathEquivalence.t.sol` (relies on the precompiles, which symbolic tools can't model) |
 
 **Assumed:** q-SDH (KZG binding); keccak256 is a random oracle (and so collision-free); `q` is prime; the BLS12-381 pairing is bilinear; the EIP-2537 / EIP-4844 precompiles, solc and the EVM behave as specified. With Q keccak queries an attacker succeeds with probability at most Q · 6/2^256.
