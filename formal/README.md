@@ -21,8 +21,9 @@ Lean 4 + Mathlib proofs of the algebra behind Blober's batched KZG verifiers.
 Since `2^256 / q = 2`, a residue has at most 3 keccak preimages, and the clamp gives the value 1
 the preimages of 0 as well, so the error per oracle query is at most `6 / 2^256` (about
 `2^-253.4`). In the random-oracle model an attacker making Q keccak queries therefore succeeds
-with probability at most `Q · 6 / 2^256`. That step, and the fact that the transcript hashes every
-input, are argued rather than proven here.
+with probability at most `Q · 6 / 2^256`. That union bound is argued rather than proven here. That
+the transcript hashes every input is proven against the Solidity code with Halmos, in
+`test/symbolic/Transcript.t.sol`.
 
 Not covered here, and stated as assumptions: KZG evaluation binding (q-SDH), keccak as a random
 oracle for the Fiat-Shamir challenges, bilinearity of the concrete BLS12-381 pairing, that the

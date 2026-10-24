@@ -1,4 +1,4 @@
-## Blober - On-chain Blob Verification Library in Solidity ![Tests](https://github.com/markolazic01/blober/workflows/CI/badge.svg) ![Formal](https://github.com/markolazic01/blober/workflows/Formal/badge.svg)
+## Blober - On-chain Blob Verification Library in Solidity ![Tests](https://github.com/markolazic01/blober/workflows/CI/badge.svg) ![Formal](https://github.com/markolazic01/blober/workflows/Formal/badge.svg) ![Symbolic](https://github.com/markolazic01/blober/workflows/Symbolic/badge.svg)
 **Blober** is a Solidity library for Ethereum blob verification (and more), by introducing a well designed set of blob point verification flows it eases helps the L2 settlements.
 
 Innovative batch KZG point evaluation approach, which is the core of Blober, is also being separately documented on it's way of becoming an EIP.
@@ -27,7 +27,8 @@ $ forge build
 ```
 $ forge test                                   # unit, regression, and fuzz tests
 $ forge test --mc PathEquivalence --fuzz-runs 3000   # the loop/batched equivalence fuzz, harder
-$ cd formal && lake exe cache get && lake build      # Lean proofs (see formal/README.md)
+$ make symbolic                                 # Halmos proofs of the code (pip install halmos==0.3.3)
+$ cd formal && lake exe cache get && lake build      # Lean proofs of the math (see formal/README.md)
 ```
 
 ---
@@ -37,7 +38,25 @@ Every 128-byte point is validated before use: canonical encoding (zero padding, 
 
 - **Path equivalence fuzzing** (`test/PathEquivalence.t.sol`): for all three shapes, mutates a valid batch (flipped bytes, swapped proofs, off-curve points, bad padding, wrong y, ...) and asserts the 0x0A loop and the batched path accept and reject exactly the same inputs.
 - **Encoding regressions** (`test/BlobVerifierEncoding.t.sol`), **coverage** (`test/BlobVerifierCoverage.t.sol`, 100% of functions), and the original unit and Fiat-Shamir regression tests (`test/BlobVerifier.t.sol`).
-- **Lean 4 proofs** (`formal/`): the batched check equals a random linear combination of the single-opening checks, it is complete, and an invalid claim passes for at most one challenge value (soundness error ≤ 1/q per challenge). CI fails if a proof uses `sorry`. Assumptions (q-SDH, keccak as a random oracle, precompile correctness) are listed in [`formal/README.md`](formal/README.md).
+- **Lean 4 proofs** (`formal/`) of the math, and **Halmos proofs** (`test/symbolic/`) that the code implements it. Both run in CI and fail on any `sorry`, counterexample or timeout.
+
+#### What is proven, and what is assumed
+
+The batched verifiers are sound if every link below holds. Each link is either machine-checked or one of the standard assumptions at the bottom.
+
+| Claim | How |
+|---|---|
+| The batched pairing check equals a random linear combination of the per-claim checks; it is complete; an invalid claim passes for at most one challenge value | Lean: `batchedCheck_eq`, `complete`, `at_most_one_bad_challenge` |
+| The shared-z and shared-C equations are the general one, factorised | Lean: `sharedZ_eq`, `sharedC_eq` |
+| The deployed challenge (`keccak mod q`, 0 → 1) lies in [1, q) and gives each value at most 6 of the 2^256 keccak outputs, so an invalid batch passes a query with probability ≤ 6/2^256 ≈ 2^-253.4 | Lean: `chal_pos_lt`, `chal_preimage_card_le`, `bad_keccak_outputs_card_le_six` |
+| The scalar written for the generator, `ySum == 0 ? 0 : q − ySum`, is −ySum mod q | Lean: `neg_scalar_encoding` |
+| The seed hashes every input: equal seeds mean equal inputs, and the three shapes never share a seed (rules out the Last Challenge Attack, ePrint 2024/398) | Halmos: `test/symbolic/Transcript.t.sol` |
+| The challenge code matches its spec | Halmos: `test/symbolic/Challenge.t.sol` |
+| Every MSM buffer slot holds exactly the point and scalar of the equation above (all three shapes, n = 1–3) | Halmos: `test/symbolic/MsmInputs.t.sol` |
+| `requireCanonical` and `compress` match the EIP-2537 / ZCash encoding specs for every 128-byte input | Halmos: `test/symbolic/Encoding.t.sol` |
+| The 0x0A fallback and the batched path accept exactly the same inputs | Fuzzed: `test/PathEquivalence.t.sol` (relies on the precompiles, which symbolic tools can't model) |
+
+**Assumed:** q-SDH (KZG binding); keccak256 is a random oracle (and so collision-free); `q` is prime; the BLS12-381 pairing is bilinear; the EIP-2537 / EIP-4844 precompiles, solc and the EVM behave as specified. With Q keccak queries an attacker succeeds with probability at most Q · 6/2^256.
 
 ---
 ### Usage
