@@ -1,4 +1,4 @@
-## Blober - On-chain Blob Verification Library in Solidity ![Tests](https://github.com/markolazic01/blober/workflows/CI/badge.svg)
+## Blober - On-chain Blob Verification Library in Solidity ![Tests](https://github.com/markolazic01/blober/workflows/CI/badge.svg) ![Formal](https://github.com/markolazic01/blober/workflows/Formal/badge.svg)
 **Blober** is a Solidity library for Ethereum blob verification (and more), by introducing a well designed set of blob point verification flows it eases helps the L2 settlements.
 
 Innovative batch KZG point evaluation approach, which is the core of Blober, is also being separately documented on it's way of becoming an EIP.
@@ -13,7 +13,7 @@ Blober's special feature is in multi-point verifications, across multiple blobs,
 
 Blober also contains other utils that can help you checksum the specific blob hash, get a versioned hash from the blob data hash, check if blob is present in the tx and more! 
 
-With introduction of 21 blob per block limit, Blober multi-point verification becomes increasingly effective, for L2s using Blober instead of iterative point validation, gas consumption can be reduced by up to **80%**!
+With introduction of 21 blob per block limit, Blober multi-point verification becomes increasingly effective, for L2s using Blober instead of iterative point validation, gas consumption can be reduced by **50–70%** at large batch sizes (see [benchmarks](#benchmarking-results)).
 
 Danksharding and Block-in-Blob EIPs can further leverage usage of Blober, potentially requiring the development of new features.
 
@@ -25,8 +25,19 @@ $ forge build
 
 ### Test
 ```
-$ forge test --fork-url <ETH_RPC>
+$ forge test                                   # unit, regression, and fuzz tests
+$ forge test --mc PathEquivalence --fuzz-runs 3000   # the loop/batched equivalence fuzz, harder
+$ cd formal && lake exe cache get && lake build      # Lean proofs (see formal/README.md)
 ```
+
+---
+### Security and verification
+
+Every 128-byte point is validated before use: canonical encoding (zero padding, coordinates < p) on every path, and an on-curve check on the 0x0A fallback, the one path where no EIP-2537 precompile sees the point. All validation runs before the Fiat-Shamir hash, and every precompile call forwards only its own gas price, so a malformed input costs a bounded amount rather than all forwarded gas.
+
+- **Path equivalence fuzzing** (`test/PathEquivalence.t.sol`): for all three shapes, mutates a valid batch (flipped bytes, swapped proofs, off-curve points, bad padding, wrong y, ...) and asserts the 0x0A loop and the batched path accept and reject exactly the same inputs.
+- **Encoding regressions** (`test/BlobVerifierEncoding.t.sol`), **coverage** (`test/BlobVerifierCoverage.t.sol`, 100% of functions), and the original unit and Fiat-Shamir regression tests (`test/BlobVerifier.t.sol`).
+- **Lean 4 proofs** (`formal/`): the batched check equals a random linear combination of the single-opening checks, it is complete, and an invalid claim passes for at most one challenge value (soundness error ≤ 1/q per challenge). CI fails if a proof uses `sorry`. Assumptions (q-SDH, keccak as a random oracle, precompile correctness) are listed in [`formal/README.md`](formal/README.md).
 
 ---
 ### Usage
@@ -51,177 +62,193 @@ MIT
 ---
 ## Benchmarking results
 
-Done on commit: d6c03fd0a01cdcf6f6a7f102ecc94a729c0c94d7
-
-Side-by-side measurement of `BlobVerifier`'s EIP-2537 batched KZG verifiers vs the industry-standard EIP-4844 0x0A-loop pattern, plus a real-mainnet replay grounding the comparison in production traffic.
+Side-by-side measurement of `BlobVerifier`'s 128-byte verifiers against the industry-standard EIP-4844 pattern (loop the `0x0A` precompile over 48-byte points), plus a replay of real mainnet traffic. Every number below comes from the files in `benchmarks/data/` and can be regenerated with the commands at the bottom.
 
 ## Headline
 
-- **Below the crossover (N=1–4), Blober is ≤3% worse than the standard** (just threshold-fallback wrapper overhead — multi-point N=1 is a worst case at −10%). Above N=5, savings flip positive and grow rapidly.
-- **Asymptotic savings at scale**: ~64% (multi-blob shared-z) and ~69% (multi-point single-blob) at N=100, measured against synthetic gas curves.
-- **Real mainnet replay** (90-day window): 4,102 KZG state-update txs from a representative production rollup contract, all at N=6, totalling 223.9M gas saved (~0.172 ETH at observed gas).
-- **Projected annualized savings**: 1.69 ETH/yr per rollup at today's behavior + trailing-1y gas; **104 ETH/yr per rollup if batches grow to N=100**; **341 ETH/yr** at N=100 + trailing-2y gas (bull-market baseline).
+- **Batching pays from N=5 against a bare 0x0A loop** and saves **~63% (many blobs, one z), ~68% (one blob, many z) and ~51% (general shape) at N=100**.
+- **Below that, Blober costs 3–13% more than a bare loop** (mostly 6–8%). That is the price of accepting 128-byte points safely: the fallback checks their encoding and that they are on the curve before compressing them for `0x0A`. If you already hold 48-byte points, the 48-byte entry points are plain loops with no such overhead.
+- **Mainnet replay** (90-day window): 4,096 KZG state-update txs from a production rollup, all at N≈6, would have saved 198.5M gas (~0.152 ETH at the gas prices they paid).
+- **Projected annual savings per rollup**: 1.50 ETH/yr at today's N=6 and trailing-1y gas, **101 ETH/yr if batches grow to N=100**, 331 ETH/yr at N=100 with trailing-2y gas.
 
-All numbers are reproducible from the artifacts in `benchmarks/data/` (commands at the bottom).
-
-![Gas vs N — multi-blob shared z](benchmarks/data/chart_gas_curves_multi_blob.png)
+![Gas vs N, many blobs, one z](benchmarks/data/chart_gas_curves_multi_blob.png)
 ![Gas savings vs N](benchmarks/data/chart_savings.png)
 
-## Synthetic benchmark — gas vs N
+## Dispatch thresholds
 
-Two test scenarios, both measured by Foundry against real EIP-2537 / EIP-4844 precompiles on `evm_version = "osaka"`. Reference verifier is `LoopVerifier.sol` — a stripped port of the industry-standard `verifyKzgProofs` loop without protocol-specific overhead (governance, state transitions, fact registration), so it represents the *best-case* baseline.
+Each 128-byte verifier picks its path by batch size: below the threshold it loops `0x0A`, at or above it it runs one MSM + pairing. The thresholds are the first N where Blober's batched path beats Blober's own validated fallback on identical inputs (`test_threshold_crossover`, `benchmarks/data/threshold_crossover.csv`):
 
-### Multi-blob, shared z (`verifySinglePointMultipleBlobs128`)
+| Constant | Shapes | Value |
+|---|---|---|
+| `BATCH_THRESHOLD_128` | many blobs at one z; one blob at many z | **4** |
+| `BATCH_THRESHOLD_GENERAL_128` | many blobs, one z each | **5** |
+
+![Where the dispatch thresholds come from](benchmarks/data/chart_threshold.png)
+
+## Synthetic benchmark: gas vs N
+
+Measured with Foundry against the real EIP-2537 / EIP-4844 precompiles (`evm_version = "osaka"`). The reference is `LoopVerifier.sol`, a stripped port of the industry-standard `verifyKzgProofs` loop without protocol-specific overhead, so it is the *best-case* baseline. Rows N=150/300/400/700 are in the CSVs.
+
+### Many blobs, one shared z (`verifySinglePointMultipleBlobs128`)
 
 `benchmarks/data/synthetic_gas_multi_blob_one_point.csv`
 
-| N | Industry-standard gas | Blober gas | Blober / Industry | Saved % |
+| N | 0x0A loop (48-byte) | Blober (128-byte) | Blober / loop | Saved |
 |---|---|---|---|---|
-| 1 | 57,380 | 59,159 | 103% | −3% |
-| 2 | 107,550 | 110,876 | 103% | −3% |
-| 3 | 160,232 | 165,100 | 103% | −3% |
-| 4 | 212,929 | 219,364 | 103% | −3% |
-| **5** | 265,646 | 243,257 | 91% | **+9%** ← crossover |
-| 10 | 529,190 | 344,358 | 65% | 35% |
-| 25 | 1,320,362 | 629,158 | 47% | 53% |
-| 50 | 2,641,262 | 1,074,528 | 40% | 60% |
-| 100 | 5,291,111 | 1,907,717 | 36% | 64% |
-| 200 | 10,649,222 | 3,666,743 | 34% | **66%** ← peak |
-| 500 | 27,198,624 | 9,573,892 | 35% | 65% |
-| 1000 | 56,057,254 | 20,899,722 | 37% | 63% |
+| 1 | 57,148 | 61,581 | 107% | −7% |
+| 2 | 107,182 | 115,950 | 108% | −8% |
+| 3 | 159,729 | 172,825 | 108% | −8% |
+| 4 | 212,292 | 226,474 | 106% | −6% ← first N where batching runs |
+| 5 | 264,873 | 247,572 | 93% | +7% ← beats the loop |
+| 10 | 527,743 | 353,307 | 66% | +34% |
+| 25 | 1,316,891 | 652,098 | 49% | +51% |
+| 50 | 2,634,417 | 1,120,547 | 42% | +58% |
+| 100 | 5,277,522 | 2,000,014 | 37% | +63% |
+| 200 | 10,622,139 | 3,851,986 | 36% | +64% |
+| 500 | 27,131,064 | 10,037,523 | 36% | +64% |
+| 1000 | 55,922,234 | 21,827,121 | 39% | +61% |
 
-The negative percentages at N=1–4 are the threshold-fallback overhead: Blober dispatches to the `0x0A` loop below N=5 (so it's never *worse* than the standard in absolute terms), but pays a small wrapper cost (compress 128→48-byte commitments before the call).
+### One blob, many z (`verifyMultiplePoints128`)
 
-### Multi-point, one blob (`verifyMultiplePoints128`)
-
-![Gas vs N — multi-point, one blob](benchmarks/data/chart_gas_curves_multi_point.png)
+![Gas vs N, one blob, many z](benchmarks/data/chart_gas_curves_multi_point.png)
 
 `benchmarks/data/synthetic_gas_multi_point_one_blob.csv`
 
-| N | Industry-standard gas | Blober gas | Blober / Industry | Saved % |
+| N | 0x0A loop (48-byte) | Blober (128-byte) | Blober / loop | Saved |
 |---|---|---|---|---|
-| 1 | 63,250 | 69,665 | 110% | −10% |
-| 2 | 106,656 | 110,134 | 103% | −3% |
-| 3 | 158,569 | 163,078 | 102% | −2% |
-| 4 | 210,487 | 216,025 | 102% | −2% |
-| **5** | 262,416 | 234,151 | 89% | **+11%** ← crossover |
-| 10 | 522,025 | 323,781 | 62% | 38% |
-| 25 | 1,301,072 | 573,540 | 44% | 56% |
-| 50 | 2,600,393 | 958,304 | 36% | 64% |
-| 100 | 5,202,220 | 1,662,229 | 31% | 69% |
-| 200 | 10,427,324 | 3,122,896 | 29% | **71%** ← peak |
-| 500 | 26,275,367 | 7,810,809 | 29% | 71% |
-| 1000 | 53,162,294 | 16,112,844 | 30% | 70% |
+| 1 | 63,034 | 71,756 | 113% | −13% |
+| 2 | 106,361 | 113,530 | 106% | −6% |
+| 3 | 158,192 | 167,807 | 106% | −6% |
+| 4 | 210,030 | 218,166 | 103% | −3% ← first N where batching runs |
+| 5 | 261,877 | 236,507 | 90% | +10% ← beats the loop |
+| 10 | 521,081 | 328,476 | 63% | +37% |
+| 25 | 1,298,914 | 585,253 | 45% | +55% |
+| 50 | 2,596,212 | 981,714 | 37% | +63% |
+| 100 | 5,193,991 | 1,709,031 | 32% | +68% |
+| 200 | 10,410,999 | 3,216,484 | 30% | +70% |
+| 500 | 26,234,756 | 8,044,753 | 30% | +70% |
+| 1000 | 53,081,207 | 16,580,712 | 31% | +69% |
 
-Multi-point peaks higher than multi-blob because the LHS has a *single shared commitment slot* (with weight `Σr_i`) instead of N separate commitment slots. Structural advantage from the math, not from extra optimization.
+One blob at many points saves more than many blobs at one point because the batched check has a *single* commitment slot (weighted by `Σr_i`) instead of N of them. The advantage comes from the algebra, not from extra optimization.
 
-## Mainnet replay — 90 days of real txs
+### General shape, many blobs with one z each (`verifyMultiplePointsMultipleBlobs128`)
 
-`benchmarks/data/reference_replay.json` — generated by `npm run replay`.
+`benchmarks/data/synthetic_gas_multi_blob_multi_point.csv`
 
-We sampled all `updateStateKzgDA` calls to a representative production rollup contract (proxy `0xc662c410…`) over the trailing 90 days.
+| N | 0x0A loop (48-byte) | Blober (128-byte) | Blober / loop | Saved |
+|---|---|---|---|---|
+| 1 | 57,601 | 62,168 | 107% | −7% |
+| 2 | 107,797 | 116,823 | 108% | −8% |
+| 3 | 160,508 | 173,984 | 108% | −8% |
+| 4 | 213,235 | 231,154 | 108% | −8% |
+| 5 | 265,984 | 281,380 | 105% | −5% ← first N where batching runs |
+| 10 | 529,686 | 423,722 | 79% | +21% |
+| 25 | 1,321,409 | 820,153 | 62% | +38% |
+| 50 | 2,643,548 | 1,431,370 | 54% | +46% |
+| 100 | 5,297,012 | 2,647,880 | 49% | +51% |
+| 200 | 10,670,830 | 5,221,716 | 48% | +52% |
+| 500 | 27,336,393 | 13,615,900 | 49% | +51% |
+| 1000 | 56,572,927 | 29,469,406 | 52% | +48% |
+
+The general shape needs one more MSM term per claim (`r_i·z_i·π_i` on the right-hand side), so it saves less and batching takes one more claim to pay off. Against a bare 48-byte loop it is still slightly behind at N=5 and ahead from somewhere between N=5 and N=10.
+
+## Mainnet replay: 90 days of real txs
+
+`benchmarks/data/reference_replay.json`, generated by `npm run replay` and re-priced against the current gas curves by `npm run reprice`.
+
+We sampled all `updateStateKzgDA` calls to a production rollup contract (proxy `0xc662c410…`) over 90 days.
 
 | Metric | Value |
 |---|---|
-| Sample size | **4,102 txs** |
-| Time window | **~89.6 days** (~1.9 txs/hour) |
-| Blobs per tx | 6 (every tx) |
+| Sample size | **4,096 txs** |
+| Time window | **~89.5 days** (~1.9 txs/hour) |
+| Blobs per tx | 6 (avg 5.99) |
 | Observed gas price | median 1.03 gwei, range 0.07–9.96 gwei |
-| **Total gas saved** | **223,860,777** |
-| **Total ETH saved** *(at the actual gas prices each tx paid)* | **0.172 ETH** |
-| Per-tx saved | 54,574 gas / 0.000042 ETH |
-| Annualized rate (assuming traffic continues) | **16,706 txs/yr** |
+| **Total gas saved** | **198,521,202** |
+| **Total ETH saved** *(at the gas price each tx paid)* | **0.152 ETH** |
+| Per-tx saved | 48,467 gas / 0.000037 ETH |
+| Annualized rate (if traffic continues) | **16,698 txs/yr** |
 
-**Why the absolute ETH is modest**: the rollup currently posts at the EIP-4844 cap of N=6 (just past our crossover, where savings sit at ~17%), and the 90-day window covers a historically depressed gas-price regime (median ~1 gwei). The savings *percentage* is structural; the absolute amount scales with gas price. See the cost matrices below for projections at non-anomalous baselines.
+**Why the absolute ETH is modest**: the rollup posts at N=6 (the EIP-7594 per-tx blob limit), just past the crossover where savings are ~15%, and the window covers a low-gas regime (median ~1 gwei). The percentage is structural; the absolute amount scales with gas price. The matrices below project it at other baselines.
 
 ## Annualized cost matrices
 
-Per-tx cost projections held against historical Ethereum daily-average gas prices (`benchmarks/data/avg_gas_price_daily.csv`, Etherscan export 2015–2026), times the observed traffic rate (16,706 txs/yr).
+Per-tx savings priced at historical Ethereum daily-average gas (`benchmarks/data/avg_gas_price_daily.csv`, Etherscan export 2015–2026), times the observed traffic rate (16,698 txs/yr).
 
 ### Historical baselines
 
 | Window | Avg gwei | Why this matters |
 |---|---|---|
 | Trailing 30d | 1.57 | Recent typical activity |
-| Trailing 90d | 0.94 | Captures depressed-gas regime |
+| Trailing 90d | 0.94 | Captures the low-gas regime |
 | **Trailing 1y** | **1.85** | Most defensible "today's typical" baseline |
-| **Trailing 2y** | **6.04** | Captures broader activity-cycle baseline |
+| **Trailing 2y** | **6.04** | Captures a broader activity cycle |
 
-(Note: trailing 5y averages ~32 gwei because it includes 2020–2022 bull-market peaks. We dropped that window — it's not representative of forward-looking conditions.)
+(Trailing 5y averages ~32 gwei because it includes the 2020–2022 peaks. We dropped it as not representative of forward-looking conditions.)
 
-### Multi-blob, shared z — annualized ETH saved (16,706 txs/yr)
+### Many blobs, one z: annualized ETH saved (16,698 txs/yr)
 
 `benchmarks/data/reference_replay.json → costMatrix.multiBlob.rows[i].perYear[baseline].saved`
 
-Tables capped at N=100 (per the hypothesis range we want to defend; the synthetic gas tables above include N=200/500/1000 measurements you can extrapolate from).
+Capped at N=100; the synthetic tables above go to N=1000.
 
 | N | 30d (1.57) | 90d (0.94) | **1y (1.85)** | **2y (6.04)** |
 |---|---|---|---|---|
-| 1 | −0.05 | −0.03 | −0.05 | −0.18 |
-| 2 | −0.09 | −0.05 | −0.10 | −0.34 |
-| 3 | −0.13 | −0.08 | −0.15 | −0.49 |
-| 4 | −0.17 | −0.10 | −0.20 | −0.65 |
-| 5 | 0.59 | 0.35 | 0.69 | 2.26 |
-| **6** *(today)* | **1.44** | **0.86** | **1.69** | **5.54** |
-| 10 | 4.84 | 2.90 | 5.70 | 18.65 |
-| 25 | 18.10 | 10.84 | 21.33 | 69.74 |
-| 50 | 41.02 | 24.57 | 48.35 | 158.07 |
-| **100** | **88.58** | **53.05** | **104.40** | **341.36** |
+| 1 | −0.12 | −0.07 | −0.14 | −0.45 |
+| 2 | −0.23 | −0.14 | −0.27 | −0.88 |
+| 3 | −0.34 | −0.21 | −0.40 | −1.32 |
+| 4 | −0.37 | −0.22 | −0.44 | −1.43 |
+| 5 | 0.45 | 0.27 | 0.53 | 1.75 |
+| **6** *(today)* | **1.28** | **0.76** | **1.50** | **4.92** |
+| 10 | 4.57 | 2.74 | 5.38 | 17.60 |
+| 25 | 17.40 | 10.42 | 20.51 | 67.07 |
+| 50 | 39.63 | 23.74 | 46.71 | 152.74 |
+| **100** | **85.80** | **51.39** | **101.14** | **330.67** |
 
-### Multi-point, one blob — annualized ETH saved (same traffic assumption)
+### One blob, many z: annualized ETH saved (same traffic assumption)
 
 `benchmarks/data/reference_replay.json → costMatrix.multiPoint.rows[i].perYear[baseline].saved`
 
 | N | 30d (1.57) | 90d (0.94) | **1y (1.85)** | **2y (6.04)** |
 |---|---|---|---|---|
-| 1 | −0.17 | −0.10 | −0.20 | −0.65 |
-| 2 | −0.09 | −0.05 | −0.11 | −0.35 |
-| 3 | −0.12 | −0.07 | −0.14 | −0.46 |
-| 4 | −0.15 | −0.09 | −0.17 | −0.56 |
-| 5 | 0.74 | 0.44 | 0.87 | 2.85 |
-| **6** *(today)* | **1.63** | **0.98** | **1.92** | **6.28** |
-| 10 | 5.19 | 3.11 | 6.12 | 20.00 |
-| 25 | 19.05 | 11.41 | 22.45 | 73.40 |
-| 50 | 42.99 | 25.75 | 50.67 | 165.67 |
-| **100** | **92.68** | **55.51** | **109.24** | **357.16** |
+| 1 | −0.23 | −0.14 | −0.27 | −0.88 |
+| 2 | −0.19 | −0.11 | −0.22 | −0.72 |
+| 3 | −0.25 | −0.15 | −0.30 | −0.97 |
+| 4 | −0.21 | −0.13 | −0.25 | −0.82 |
+| 5 | 0.66 | 0.40 | 0.78 | 2.56 |
+| **6** *(today)* | **1.54** | **0.92** | **1.81** | **5.93** |
+| 10 | 5.04 | 3.02 | 5.94 | 19.43 |
+| 25 | 18.68 | 11.19 | 22.02 | 72.00 |
+| 50 | 42.27 | 25.31 | 49.82 | 162.89 |
+| **100** | **91.23** | **54.64** | **107.54** | **351.60** |
+
+Negative values at N=1–4 are what a caller would pay *if it called Blober with 128-byte points at those sizes* instead of a bare 48-byte loop.
 
 ### Visualizations
 
 ![ETH/yr left on the table at today's batch size](benchmarks/data/chart_eth_saved_today.png)
 
-![Annualized ETH saved per rollup — scales rapidly with batch size](benchmarks/data/chart_eth_saved_scaling.png)
+![Annualized ETH saved per rollup vs batch size](benchmarks/data/chart_eth_saved_scaling.png)
 
-> **N capped at 100** in both charts. Per-rollup, same observed traffic rate (16,706 txs/yr) across all rows.
+> **N capped at 100** in both charts. Per rollup, same observed traffic rate (16,698 txs/yr) across all rows.
 
-### Demo-friendly chain of headlines
+## Methodology and caveats
 
-- *"At today's rollup behavior (N=6) and trailing-1y gas, we save **1.69 ETH/yr per rollup**, grounded in 90 days of real mainnet activity."*
-- *"If protocols allow N=100 batches, savings hit **~104 ETH/yr per rollup** — 62× the current case."*
-- *"At trailing-2y gas baselines (6 gwei) and N=100, savings hit **~341 ETH/yr per rollup** — projected bull-market savings."*
-- *"Multi-point use cases save consistently more than multi-blob (~71% vs ~66% asymptote) — structural advantage from the LHS slot reduction."*
+### What we measured directly
 
-## Methodology + caveats
+- **Synthetic gas curves**: Foundry tests on identical inputs (`fixtures_multi_blob.json`, `fixtures_multi_point.json`), measuring `gasleft()` around external calls to `LoopVerifier` and a thin wrapper around `BlobVerifier` (both in `benchmarks/`).
+- **Dispatch thresholds**: both halves of each Blober verifier, called directly on the same inputs.
+- **Real tx blob counts and gas prices**: pulled from public RPC + Blockscout for one contract over 90 days (4,096 txs).
 
-We've tried to be rigorous about what we measured vs. what we extrapolated. Honest caveats matter for credibility:
+### What we extrapolated or assumed
 
-### What we directly measured
-
-- **Synthetic gas curves**: Foundry tests on identical inputs (`fixtures_multi_blob.json`, `fixtures_multi_point.json`), measuring `gasleft()` before/after external calls to two contracts (`LoopVerifier`, our `BatchedVerifier` harness around `BlobVerifier`).
-- **Real tx blob counts and gas prices**: pulled from public RPC + Blockscout for the actual contract over a 90-day window — 4,102 txs.
-
-### What we extrapolated / assumed
-
-- **Linear interpolation for off-grid N**: the cost matrix uses linear interpolation between measured benchmark points. We measured directly up to N=1000 — the matrix is interpolation-only inside that range, not extrapolation.
-- **Hypothetical N values vs current Ethereum constraints**: N=200/500/1000 rows assume protocol-level changes (current EIP-4844 caps blobs/tx at ~9). The math works; the *opportunity* is gated on protocol evolution.
-- **Single-contract sample**: we replayed one rollup. Other rollups using KZG verification have different patterns. Ecosystem-wide impact is bigger but harder to defend without per-rollup data.
-- **Verification-slice savings, not whole-tx savings**: we compare *the verification portion* of gas. Real txs also pay for state-update logic, message processing, etc. — savings here don't reduce those.
-- **Daily-average gas underestimate**: state-update txs typically pay above-average gas for inclusion priority. Our cost projections at historical baselines are likely *conservative*.
-- **Reference loop is a stripped port**: `LoopVerifier.sol` strips Starknet-specific overhead (program-output parsing, fact registration). Real production loops are slower than our reference, so our savings are an *underestimate* of what a real swap-in would yield.
-
-### Measurement noise
-
-- Foundry's `gasleft()` includes outer-call overhead (~21k intrinsic + calldata copy). Both verifiers are measured the same way, so comparison is fair, but absolute numbers include this fixed overhead.
-- The N=1 row shows a slight negative (−3% multi-blob, −10% multi-point) because the threshold fallback path adds compress + 0x0A — slightly more work than calling 0x0A directly. The absolute amount is sub-milliETH and only matters for hypothetical N=1 calls. Real rollups always batch.
+- **Execution gas only, no calldata.** The measured calls happen inside one transaction, so they include neither the 21k intrinsic cost nor calldata. Blober takes 128-byte points (192 ABI bytes each) where the loop takes 48-byte ones (128), so a real transaction pays more calldata. Pricing calldata at 4/16 gas per zero/non-zero byte, savings at N=10 drop from 34% to 28% (shared z), 37% to 34% (one blob) and 20% to 16% (general); at N=100 from 63% to 56%, 68% to 63% and 51% to 44%. At N=5 the shared-z saving drops from 7% to 3%.
+- **Linear interpolation for off-grid N**: the cost matrices interpolate between measured points (measured directly up to N=1000).
+- **N above 6 needs protocol changes**: EIP-7594 caps a transaction at 6 blobs, so larger N means more points per blob or protocol evolution.
+- **One contract sampled**: other rollups batch differently.
+- **Verification slice only**: real txs also pay for state updates, messaging, etc.
+- **Daily-average gas underestimates**: state-update txs usually pay above-average gas, so the projections are likely conservative.
+- **The reference loop is stripped**: real production loops carry more overhead than `LoopVerifier.sol`, so savings against them would be larger.
 
 ## Where the data lives
 
@@ -230,47 +257,47 @@ benchmarks/
 ├── data/
 │   ├── fixtures_multi_blob.json                   ← 1000 random blobs at z=1 (input)
 │   ├── fixtures_multi_point.json                  ← 1 blob at 1000 distinct z (input)
-│   ├── synthetic_gas_multi_blob_one_point.csv     ← gas curve, regenerated by `forge test`
-│   ├── synthetic_gas_multi_point_one_blob.csv     ← gas curve, regenerated by `forge test`
+│   ├── synthetic_gas_*.csv                        ← gas curves, regenerated by `forge test`
+│   ├── threshold_crossover.csv                    ← Blober fallback vs batched, N=2..8
 │   ├── avg_gas_price_daily.csv                    ← Etherscan historical export, 2015–2026
 │   ├── reference_replay.json                      ← per-tx mainnet replay + cost matrices
 │   └── chart_*.png                                ← generated by `scripts/generate_charts.py`
 │
 ├── scripts/
 │   ├── generate_fixtures.ts                       ← npm run generate
-│   ├── fetch_reference_txs.ts                     ← npm run replay
+│   ├── fetch_reference_txs.ts                     ← npm run replay / npm run reprice
 │   └── generate_charts.py                         ← matplotlib chart regenerator
 │
 ├── src/LoopVerifier.sol                           ← the comparison reference
-├── test/Compare.t.sol                             ← side-by-side gas measurement harness
-└── foundry.toml
+└── test/Compare.t.sol                             ← gas measurement harness
 ```
 
 ## Reproducibility
 
-From `benchmarks/scripts/`:
+From the repo root:
 
 ```bash
-npm install            # one-time, installs c-kzg + @noble/curves + tsx
-npm run generate       # regenerates fixtures_multi_blob.json + fixtures_multi_point.json (~50s)
-```
-
-From `benchmarks/`:
-
-```bash
-forge test -vv         # regenerates both synthetic_gas_*.csv (~5s)
+FOUNDRY_PROFILE=benchmark forge test     # regenerates synthetic_gas_*.csv and threshold_crossover.csv (~5s)
 ```
 
 From `benchmarks/scripts/`:
 
 ```bash
-npm run replay         # regenerates reference_replay.json (~45s for 90-day window, ~4000 txs)
+npm install            # one-time: c-kzg + @noble/curves + tsx
+npm run generate       # regenerates the fixture JSONs (~50s)
+npm run reprice        # re-prices the saved replay against the current CSVs (offline, ~1s)
+npm run replay         # re-samples mainnet: new 90-day window (~45s, ~4000 txs)
 ```
 
-Configurable via env vars:
+`npm run replay` is configurable via env vars (no API keys needed; Blockscout for tx listing, a public RPC for receipts):
 
 ```bash
 WINDOW_DAYS=90 MAX_SAMPLE=5000 RPC_CONCURRENCY=10 npm run replay
 ```
 
-No API keys required. The replay uses Blockscout (free, no auth) for tx listing and a public Ethereum RPC for tx receipts.
+Charts (one-time venv setup, then run anytime):
+
+```bash
+python3 -m venv benchmarks/.venv && benchmarks/.venv/bin/pip install matplotlib
+benchmarks/.venv/bin/python benchmarks/scripts/generate_charts.py
+```
